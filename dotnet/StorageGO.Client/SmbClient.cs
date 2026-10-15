@@ -1,26 +1,28 @@
-using System.Runtime.InteropServices;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace StorageGO;
 
 public sealed class SmbClient : ISmbClient
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-    };
-
+    private readonly object _gate = new();
     private readonly NativeClientHandle _handle;
+    private readonly int _chunkSize;
+    private readonly long _maxReadBytes;
     private bool _disposed;
 
-    private SmbClient(NativeClientHandle handle) => _handle = handle;
+    private SmbClient(NativeClientHandle handle, SmbClientOptions options)
+    {
+        _handle = handle;
+        _chunkSize = options.ChunkSizeBytes;
+        _maxReadBytes = Math.Min(options.MaxReadBytes, Array.MaxLength);
+    }
 
     public static ISmbClient Create(SmbClientOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
         Validate(options);
         NativeMethods.EnsureInitialized();
+        EnsureCompatibleAbi();
 
         var config = new
         {
@@ -34,27 +36,80 @@ public sealed class SmbClient : ISmbClient
             options.MaxReadBytes
         };
 
-        var response = InvokeJson<CreateResponse>(() =>
-            NativeMethods.StorageGO_CreateClient(JsonSerializer.Serialize(config, JsonOptions)));
-        if (!response.Success || response.ClientId == 0)
+        var response = NativeJson.Invoke<CreateResponse>(() =>
+            NativeMethods.StorageGO_CreateClient(JsonSerializer.Serialize(config, NativeJson.Options)));
+        NativeJson.EnsureSuccess(response.Success, response.Error);
+        if (response.ClientId == 0)
         {
-            throw new SmbException(response.Error ?? "Native SMB client oluşturulamadı.");
+            throw new SmbException("Native SMB client returned an invalid client ID.");
         }
 
-        return new SmbClient(new NativeClientHandle(response.ClientId));
+        return new SmbClient(new NativeClientHandle(response.ClientId), options);
     }
+
+    public Stream OpenRead(string remotePath) => Open(remotePath, writeOptions: null);
+
+    public Stream OpenWrite(string remotePath, SmbWriteOptions? options = null) =>
+        Open(remotePath, options ?? new SmbWriteOptions());
 
     public SmbFile Read(string remotePath)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentException.ThrowIfNullOrWhiteSpace(remotePath);
+        return WithStream(Open(remotePath, writeOptions: null), source =>
+        {
+            if (source.FileSize > _maxReadBytes)
+            {
+                throw ReadLimitExceeded();
+            }
 
-        var response = Send(new NativeRequest("read", remotePath));
-        return new SmbFile(
-            response.FileName ?? Path.GetFileName(remotePath),
-            response.FileSize,
-            response.MimeType ?? "application/octet-stream",
-            response.Content ?? []);
+            using var destination = new MemoryStream(checked((int)Math.Max(0, source.FileSize)));
+            var buffer = new byte[_chunkSize];
+            int count;
+            while ((count = source.Read(buffer, 0, buffer.Length)) != 0)
+            {
+                if (destination.Length > _maxReadBytes - count)
+                {
+                    throw ReadLimitExceeded();
+                }
+
+                destination.Write(buffer, 0, count);
+            }
+
+            return new SmbFile(source.FileName, destination.Length, source.MimeType, destination.ToArray());
+        });
+    }
+
+    public SmbWriteResult CopyTo(
+        string remotePath,
+        Stream destination,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        if (!destination.CanWrite)
+        {
+            throw new ArgumentException("The destination must be writable.", nameof(destination));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return WithStream(Open(remotePath, writeOptions: null), source =>
+        {
+            var buffer = new byte[_chunkSize];
+            long transferred = 0;
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var count = source.Read(buffer, 0, buffer.Length);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (count == 0)
+                {
+                    break;
+                }
+
+                destination.Write(buffer, 0, count);
+                transferred = checked(transferred + count);
+            }
+
+            return new SmbWriteResult(source.FileName, transferred, source.MimeType);
+        });
     }
 
     public SmbWriteResult Write(
@@ -62,69 +117,155 @@ public sealed class SmbClient : ISmbClient
         ReadOnlyMemory<byte> content,
         SmbWriteOptions? options = null)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentException.ThrowIfNullOrWhiteSpace(remotePath);
-        options ??= new SmbWriteOptions();
+        return WithStream(Open(remotePath, options ?? new SmbWriteOptions()), destination =>
+        {
+            destination.Write(content.Span);
+            return new SmbWriteResult(destination.FileName, destination.BytesTransferred, destination.MimeType);
+        });
+    }
 
-        var response = Send(new NativeRequest(
-            "write",
-            remotePath,
-            content.ToArray(),
-            options.Overwrite,
-            options.ForceSync,
-            options.MimeType));
+    public SmbWriteResult Write(
+        string remotePath,
+        Stream source,
+        SmbWriteOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (!source.CanRead)
+        {
+            throw new ArgumentException("The source must be readable.", nameof(source));
+        }
 
-        return new SmbWriteResult(
-            response.FileName ?? Path.GetFileName(remotePath),
-            response.FileSize,
-            response.MimeType ?? options.MimeType ?? "application/octet-stream");
+        cancellationToken.ThrowIfCancellationRequested();
+        return WithStream(Open(remotePath, options ?? new SmbWriteOptions()), destination =>
+        {
+            var buffer = new byte[_chunkSize];
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var count = source.Read(buffer, 0, buffer.Length);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (count == 0)
+                {
+                    break;
+                }
+
+                destination.Write(buffer, 0, count);
+            }
+
+            return new SmbWriteResult(destination.FileName, destination.BytesTransferred, destination.MimeType);
+        });
     }
 
     public void Dispose()
     {
-        if (_disposed)
+        lock (_gate)
         {
-            return;
-        }
+            if (_disposed)
+            {
+                return;
+            }
 
-        _disposed = true;
-        _handle.Dispose();
+            _disposed = true;
+            // Transfer handles retain a native reference until their streams are closed.
+            _handle.Dispose();
+        }
     }
 
-    private NativeResponse Send(NativeRequest request)
+    private NativeSmbStream Open(string remotePath, SmbWriteOptions? writeOptions)
     {
-        var json = JsonSerializer.Serialize(request, JsonOptions);
-        var response = InvokeJson<NativeResponse>(() => NativeMethods.StorageGO_Invoke(_handle, json));
-        if (!response.Success)
+        ArgumentException.ThrowIfNullOrWhiteSpace(remotePath);
+        if (remotePath.Contains('\0'))
         {
-            throw new SmbException(response.Error ?? "SMB işlemi başarısız.");
+            throw new ArgumentException("Remote paths cannot contain a null character.", nameof(remotePath));
         }
 
-        return response;
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var response = NativeJson.Invoke<NativeJson.OpenResponse>(() => writeOptions is null
+                ? NativeMethods.StorageGO_OpenRead(_handle, remotePath)
+                : NativeMethods.StorageGO_OpenWrite(_handle, remotePath, writeOptions.Overwrite ? 1 : 0));
+            NativeJson.EnsureSuccess(response.Success, response.Error);
+            if (response.TransferId == 0)
+            {
+                throw new SmbException("Native SMB layer returned an invalid transfer ID.");
+            }
+
+            NativeTransferHandle? transfer = null;
+            try
+            {
+                transfer = new NativeTransferHandle(response.TransferId, _handle);
+                return new NativeSmbStream(
+                    transfer,
+                    _chunkSize,
+                    readable: writeOptions is null,
+                    forceSync: writeOptions?.ForceSync ?? false,
+                    inferMime: writeOptions is not null && string.IsNullOrEmpty(writeOptions.MimeType),
+                    response.FileName ?? remotePath.Replace('\\', '/').Split('/')[^1],
+                    response.FileSize,
+                    !string.IsNullOrEmpty(writeOptions?.MimeType)
+                        ? writeOptions.MimeType
+                        : response.MimeType ?? "application/octet-stream");
+            }
+            catch
+            {
+                if (transfer is not null)
+                {
+                    transfer.Dispose();
+                }
+                else
+                {
+                    try
+                    {
+                        NativeJson.Invoke<NativeJson.StatusResponse>(() =>
+                            NativeMethods.StorageGO_CloseTransfer(response.TransferId, 0));
+                    }
+                    catch
+                    {
+                        // Preserve the allocation/handle failure; native client disposal also cleans transfers.
+                    }
+                }
+
+                throw;
+            }
+        }
     }
 
-    private static T InvokeJson<T>(Func<IntPtr> nativeCall)
-    {
-        var pointer = nativeCall();
-        if (pointer == IntPtr.Zero)
-        {
-            throw new SmbException("Native katman boş yanıt döndürdü.");
-        }
+    private SmbException ReadLimitExceeded() => new(
+        $"The file exceeds the in-memory Read limit of {_maxReadBytes} bytes. Use OpenRead or CopyTo for streaming.");
 
+    private static T WithStream<T>(NativeSmbStream stream, Func<NativeSmbStream, T> operation)
+    {
+        T result;
         try
         {
-            var json = Marshal.PtrToStringUTF8(pointer)
-                ?? throw new SmbException("Native yanıt UTF-8 olarak okunamadı.");
-            return JsonSerializer.Deserialize<T>(json, JsonOptions)
-                ?? throw new SmbException("Native yanıt JSON olarak okunamadı.");
+            result = operation(stream);
         }
-        catch (JsonException exception)
+        catch
         {
-            throw new SmbException($"Native yanıt JSON olarak okunamadı: {exception.Message}");
+            // Keep the original I/O/cancellation failure if closing a partial transfer also fails.
+            stream.Abort();
+            throw;
         }
-        finally
+
+        stream.Dispose();
+        return result;
+    }
+
+    private static void EnsureCompatibleAbi()
+    {
+        try
         {
-            NativeMethods.StorageGO_FreeResult(pointer);
+            var version = NativeMethods.StorageGO_ABIVersion();
+            if (version != 2)
+            {
+                throw new NotSupportedException($"StorageGO native ABI 2 is required; loaded ABI {version}.");
+            }
+        }
+        catch (EntryPointNotFoundException exception)
+        {
+            throw new NotSupportedException("The native StorageGO library is outdated. Deploy a library with chunk ABI 2.", exception);
         }
     }
 
@@ -138,32 +279,22 @@ public sealed class SmbClient : ISmbClient
         {
             throw new ArgumentOutOfRangeException(nameof(options.Port));
         }
+
         if (options.DialTimeout <= TimeSpan.Zero || options.DialTimeout > TimeSpan.FromMinutes(5))
         {
             throw new ArgumentOutOfRangeException(nameof(options.DialTimeout));
         }
+
         if (options.MaxReadBytes <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(options.MaxReadBytes));
         }
+
+        if (options.ChunkSizeBytes is < 1 or > 4 * 1024 * 1024)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options.ChunkSizeBytes), "Chunk size must be between 1 byte and 4 MiB.");
+        }
     }
 
     private sealed record CreateResponse(bool Success, ulong ClientId, string? Error);
-
-    private sealed record NativeRequest(
-        string Action,
-        string Path,
-        byte[]? Content = null,
-        bool Overwrite = false,
-        bool ForceSync = false,
-        string? MimeType = null);
-
-    private sealed record NativeResponse(
-        bool Success,
-        string? Message,
-        string? FileName,
-        long FileSize,
-        string? MimeType,
-        byte[]? Content,
-        string? Error);
 }

@@ -15,6 +15,7 @@ public sealed class SmbWriteOptions
 {
     public bool Overwrite { get; init; }
 
+    /// <summary>Syncs the remote file before closing a successful upload.</summary>
     public bool ForceSync { get; init; }
 
     public string? MimeType { get; init; }

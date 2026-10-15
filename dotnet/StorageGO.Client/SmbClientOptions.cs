@@ -18,8 +18,10 @@ public sealed class SmbClientOptions
     public TimeSpan DialTimeout { get; init; } = TimeSpan.FromSeconds(15);
 
     /// <summary>
-    /// Maximum file size returned by Read. The limit protects the process because
-    /// the current native ABI returns the complete file in one response.
+    /// Maximum file size buffered by Read. Streaming APIs do not apply this limit.
     /// </summary>
     public long MaxReadBytes { get; init; } = 256L * 1024 * 1024;
+
+    /// <summary>Maximum bytes transferred per native call, from 1 byte to 4 MiB.</summary>
+    public int ChunkSizeBytes { get; init; } = 1024 * 1024;
 }

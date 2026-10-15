@@ -18,7 +18,9 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test Go code
-        run: go test ./...
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race ./...
       - name: Build Linux shared library
         env:
           CGO_ENABLED: "1"
@@ -27,6 +29,11 @@ jobs:
         run: |
           mkdir -p artifacts/linux-x64
           go build -trimpath -buildmode=c-shared -o artifacts/linux-x64/libstoragego.so .
+      - name: Verify chunk ABI header
+        run: |
+          for symbol in StorageGO_ABIVersion StorageGO_CreateClient StorageGO_Invoke StorageGO_CloseClient StorageGO_FreeResult StorageGO_OpenRead StorageGO_OpenWrite StorageGO_ReadChunk StorageGO_WriteChunk StorageGO_FlushTransfer StorageGO_CloseTransfer; do
+            grep -Fq "${symbol}(" artifacts/linux-x64/libstoragego.h || { echo "Missing ABI declaration: ${symbol}"; exit 1; }
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: storagego-linux-x64
@@ -41,6 +48,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
       - name: Enable MinGW for CGO
         shell: pwsh
         run: |
@@ -60,7 +70,7 @@ jobs:
         shell: pwsh
         env:
           CGO_ENABLED: "1"
-        run: go test ./...
+        run: go test -race ./...
       - name: Build Windows shared library
         shell: pwsh
         env:
@@ -70,6 +80,24 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force artifacts/win-x64 | Out-Null
           go build -trimpath -buildmode=c-shared -o artifacts/win-x64/storagego.dll .
+      - name: Verify chunk ABI header
+        shell: pwsh
+        run: |
+          $header = Get-Content -Raw artifacts/win-x64/storagego.h
+          $symbols = @(
+            'StorageGO_ABIVersion', 'StorageGO_CreateClient', 'StorageGO_Invoke',
+            'StorageGO_CloseClient', 'StorageGO_FreeResult', 'StorageGO_OpenRead',
+            'StorageGO_OpenWrite', 'StorageGO_ReadChunk', 'StorageGO_WriteChunk',
+            'StorageGO_FlushTransfer', 'StorageGO_CloseTransfer'
+          )
+          foreach ($symbol in $symbols) {
+            if ($header -notmatch "\b$symbol\(") {
+              throw "Missing ABI declaration: $symbol"
+            }
+          }
+      - name: Verify .NET chunk interop
+        shell: pwsh
+        run: ./tests/run-interop.ps1
       - uses: actions/upload-artifact@v7
         with:
           name: storagego-win-x64

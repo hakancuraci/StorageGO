@@ -116,34 +116,13 @@ func marshalCreateResponse(response nativeCreateResponse) string {
 // The C ABI must not let a Go panic cross the native boundary because that can
 // terminate the hosting .NET process.
 func createNativeClientSafely(configJSON string) (result string) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			result = marshalCreateResponse(nativeCreateResponse{
-				Success: false,
-				Error:   fmt.Sprintf("beklenmeyen native hata: %v", recovered),
-			})
-		}
-	}()
-	return marshalCreateResponse(createNativeClient(configJSON))
+	return nativeControlJSON(func() any { return createNativeClient(configJSON) })
 }
 
 func invokeNativeRequestSafely(clientID uint64, requestJSON string) (result string) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			result = marshalNativeResponse(failedFileResponse(fmt.Sprintf("beklenmeyen native hata: %v", recovered)))
-		}
-	}()
-	return marshalNativeResponse(invokeNativeRequest(clientID, requestJSON))
+	return nativeControlJSON(func() any { return invokeNativeRequest(clientID, requestJSON) })
 }
 
 func closeNativeClientSafely(clientID uint64) (result string) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			result = marshalCreateResponse(nativeCreateResponse{
-				Success: false,
-				Error:   fmt.Sprintf("beklenmeyen native hata: %v", recovered),
-			})
-		}
-	}()
-	return marshalCreateResponse(closeNativeClient(clientID))
+	return nativeControlJSON(func() any { return closeNativeClient(clientID) })
 }

@@ -21,32 +21,126 @@ using ISmbClient client = SmbClient.Create(new SmbClientOptions
     Password = configuration["Smb:Password"]!,
     Domain = configuration["Smb:Domain"],        // opsiyonel
     DialTimeout = TimeSpan.FromSeconds(15),
-    MaxReadBytes = 128 * 1024 * 1024
+    ChunkSizeBytes = 1024 * 1024,               // varsayılan: 1 MiB
+    MaxReadBytes = 64L * 1024 * 1024             // yalnızca Read için
 });
 
-var source = client.Read(@"invoices\2026\invoice.pdf");
-await File.WriteAllBytesAsync("invoice.pdf", source.Content);
+// Büyük dosyaları tamamen belleğe almadan indirme.
+using (var destination = File.Create("invoice.pdf"))
+{
+    SmbWriteResult downloaded = client.CopyTo(
+        @"invoices\2026\invoice.pdf", destination);
+}
 
-var content = await File.ReadAllBytesAsync("result.pdf");
-var written = client.Write(
-    @"outbox\result.pdf",
-    content,
-    new SmbWriteOptions
-    {
-        Overwrite = true,
-        ForceSync = true,
-        MimeType = "application/pdf"
-    });
+// Büyük dosyaları tamamen belleğe almadan yükleme.
+using (var source = File.OpenRead("result.pdf"))
+{
+    SmbWriteResult uploaded = client.Write(
+        @"outbox\result.pdf",
+        source,
+        new SmbWriteOptions
+        {
+            Overwrite = true,
+            ForceSync = true,
+            MimeType = "application/pdf"
+        });
+}
 ```
 
-`SmbClient.Create` yapılandırmayı doğrular. Ağ bağlantısı ilk `Read` veya `Write`
-çağrısında açılır ve client dispose edilene kadar yeniden kullanılır. Her client
-kendi bağlantı/session/share yaşam döngüsüne sahiptir. Native hata sonuçları .NET
+`SmbClient.Create` yapılandırmayı doğrular. Ağ bağlantısı ilk dosya işleminde
+açılır ve client dispose edilene kadar yeniden kullanılır. Her client kendi
+bağlantı/session/share yaşam döngüsüne sahiptir. Native hata sonuçları .NET
 tarafında `SmbException` olarak döner.
 
-`MaxReadBytes` önemlidir: mevcut ABI bir dosyayı tek çağrıda ve JSON/base64 ile
-taşır. Çok büyük dosyalar için ileride stream/chunk tabanlı ayrı bir ABI tercih
-edilmelidir.
+Küçük dosyalar için mevcut kolay kullanım korunur; bu metotlar da native katmana
+chunk'lar halinde aktarır:
+
+```csharp
+SmbFile file = client.Read(@"config\settings.json");
+SmbWriteResult result = client.Write(
+    @"backup\settings.json", file.Content,
+    new SmbWriteOptions { Overwrite = true });
+```
+
+`Read` tüm içeriği bir `byte[]` olarak döndürür ve `MaxReadBytes` sınırına tabidir.
+Stream metotları bu dosya boyutu sınırına tabi değildir. Büyük dosyalarda
+`CopyTo`, `Write(path, Stream)` veya `OpenRead`/`OpenWrite` kullanın.
+
+## Stream ve chunk davranışı
+
+`ISmbClient` şu metotları sunar:
+
+```csharp
+SmbFile Read(string remotePath);
+SmbWriteResult Write(string remotePath, ReadOnlyMemory<byte> content,
+    SmbWriteOptions? options = null);
+Stream OpenRead(string remotePath);
+Stream OpenWrite(string remotePath, SmbWriteOptions? options = null);
+SmbWriteResult CopyTo(string remotePath, Stream destination,
+    CancellationToken cancellationToken = default);
+SmbWriteResult Write(string remotePath, Stream source,
+    SmbWriteOptions? options = null,
+    CancellationToken cancellationToken = default);
+```
+
+Stream'i kendiniz yönetmek istediğinizde:
+
+```csharp
+using (Stream remote = client.OpenRead(@"archives\large.zip"))
+using (FileStream local = File.Create("large.zip"))
+{
+    remote.CopyTo(local, bufferSize: 1024 * 1024);
+}
+
+using (FileStream local = File.OpenRead("large.zip"))
+using (Stream remote = client.OpenWrite(
+    @"archives\large.zip", new SmbWriteOptions { Overwrite = true }))
+{
+    local.CopyTo(remote, bufferSize: 1024 * 1024);
+}
+```
+
+Client ve açılan her stream için `using` kullanın. Stream'ler native client'ı
+kullanımda tutar; client dispose edildiğinde yeni işlem başlatılamaz, açık
+stream'ler kapandığında native client da serbest bırakılır. Normal kullanımda
+stream'leri client'tan önce kapatın. `CopyTo` ve `Write(path, Stream)` kendilerine
+verilen yerel stream'i kapatmaz. `ForceSync = true`, yazmanın sonunda uzak dosya
+için SMB flush ister.
+
+`ChunkSizeBytes` varsayılanı 1 MiB'dır; 1 byte ile 4 MiB arasında ayarlanabilir.
+Stream transferinde dosya içeriği JSON/base64'e çevrilmez: her chunk doğrudan C
+buffer'ı üzerinden taşınır. JSON yalnızca küçük kontrol/metadata yanıtlarında
+kullanılır. Transfer için ek bellek dosya boyutuyla değil chunk boyutuyla büyür;
+kullanıcının stream'i ve SMB/.NET çalışma zamanı buffer'ları ayrıca bellek
+kullanabilir. `Read` ile dönen `byte[]` ve bellekte oluşturduğunuz kaynak içerik
+ise doğal olarak tüm dosyayı bellekte tutar.
+
+İşlemler senkrondur. `CopyTo` ve `Write(path, Stream)` için verilen cancellation
+token chunk'lar arasında kontrol edilir; o anda çalışan SMB çağrısını kesmez.
+Stream'ler yalnızca ileri yönde ilerler; `Seek`, `Length` ve `Position`
+desteklenmez. `ReadAsync`, `WriteAsync`, `FlushAsync` ve `CopyToAsync`
+`NotSupportedException` döndürür.
+
+Yazmalar atomik değildir. Hata veya iptal, uzak dosyayı kısmen yazılmış halde
+bırakabilir; `Overwrite = true` ile açmak mevcut dosyayı başta kısaltabilir.
+Otomatik retry yapılmaz. Atomik yayınlama gerekiyorsa uygulama ayrı bir geçici
+dosya ve rename iş akışı tasarlamalıdır.
+
+Bir client'ın native işlemleri sıraya alınır. Eşzamanlı bağımsız transferlerde
+ayrı client kullanın; her client kendi SMB oturumunu oluşturur.
+
+## Native ABI v2
+
+.NET wrapper binary chunk ABI v2 gerektirir; wrapper ile native dosyaları birlikte
+güncelleyin. Önceki sürümün DLL/SO dosyası yeni wrapper ile kullanılamaz. Eski
+`StorageGO_CreateClient`, `StorageGO_Invoke`, `StorageGO_CloseClient` ve
+`StorageGO_FreeResult` export'ları eski tüketiciler için korunur; eski JSON/base64
+yolu büyük dosyalar için uygun değildir.
+
+Yeni export'lar: `StorageGO_ABIVersion`, `StorageGO_OpenRead`,
+`StorageGO_OpenWrite`, `StorageGO_ReadChunk`, `StorageGO_WriteChunk`,
+`StorageGO_FlushTransfer` ve `StorageGO_CloseTransfer`. Her build, native
+kütüphanenin yanında C ABI imzalarını içeren bir `.h` üretir.
 
 ## Native dosya yerleşimi
 
@@ -85,6 +179,26 @@ go build -trimpath -buildmode=c-shared -o artifacts/win-x64/storagego.dll .
 dotnet build StorageGO.sln -c Release
 ```
 
+## Testler
+
+Go testleri için CGO ve GCC etkin olmalıdır:
+
+```powershell
+$env:CGO_ENABLED = "1"
+go test -race ./...
+```
+
+.NET/native chunk aktarımı testleri için .NET 8, Go, GCC ve PowerShell 7 gerekir:
+
+```powershell
+pwsh -File ./tests/run-interop.ps1
+```
+
+Bu testler gerçek P/Invoke üzerinden üretimde kullanılan chunk yönetimini yerel
+dosyalarla doğrular; SMB sunucusu veya kimlik bilgisi gerektirmez. Test kütüphanesi
+ayrı bir dizine üretilir ve yalnızca test uygulamasında yüklenir. Gerçek SMB
+sunucusuyla ağ ve kimlik doğrulama entegrasyon testlerinin yerini tutmaz.
+
 ## GitHub Actions çıktıları
 
 [Build workflow](.github/workflows/build-native.yml) her push, pull request veya
@@ -94,5 +208,9 @@ manuel çalıştırmada şu artifact'leri üretir:
 - `storagego-win-x64`: `.dll` ve C header
 - `StorageGO-dotnet-package`: her iki native runtime'ı içeren `.nupkg`
 
-Parola yanıt, exception veya log içine eklenmez. `ISmbClient` mutlaka dispose
-edilmelidir; `using` kullanımı bunun en güvenli yoludur.
+Her iki platformda Go race testleri ve ABI header kontrolü, Windows'ta ayrıca
+.NET/native chunk aktarım testleri çalıştırılır.
+
+Parolayı loglamayın veya exception mesajlarına eklemeyin. Kimlik bilgilerini
+güvenilir yapılandırmadan okuyun; client ve stream'leri deterministik olarak
+dispose edin.

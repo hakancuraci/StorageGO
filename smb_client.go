@@ -76,12 +76,13 @@ func (c *NativeClientConfig) setDefaultsAndValidate() error {
 // nativeSMBClient owns a TCP connection, SMB session and mounted share. opMu
 // makes Close and I/O race-free and keeps each SMB session isolated.
 type nativeSMBClient struct {
-	config  NativeClientConfig
-	opMu    sync.Mutex
-	closed  bool
-	conn    net.Conn
-	session *smb2.Session
-	share   *smb2.Share
+	config    NativeClientConfig
+	opMu      sync.Mutex
+	closed    bool
+	conn      net.Conn
+	session   *smb2.Session
+	share     *smb2.Share
+	transfers map[uint64]*nativeTransfer
 }
 
 func newNativeSMBClient(config NativeClientConfig) (*nativeSMBClient, error) {
@@ -127,6 +128,14 @@ func (c *nativeSMBClient) connectLocked() (*smb2.Share, error) {
 }
 
 func (c *nativeSMBClient) resetLocked() {
+	// A mounted share must outlive every file opened from it. Remove handles
+	// before unmounting so concurrent calls cannot use files on a stale session.
+	for id, transfer := range c.transfers {
+		transfer.closed = true
+		_ = transfer.file.Close()
+		delete(c.transfers, id)
+		unregisterNativeTransfer(id)
+	}
 	if c.share != nil {
 		_ = c.share.Umount()
 		c.share = nil

@@ -15,6 +15,9 @@ internal static class NativeMethods
     internal static void EnsureInitialized() { }
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern uint StorageGO_ABIVersion();
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr StorageGO_CreateClient(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string configJson);
 
@@ -25,6 +28,35 @@ internal static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr StorageGO_CloseClient(ulong clientId);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr StorageGO_OpenRead(
+        NativeClientHandle clientId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr StorageGO_OpenWrite(
+        NativeClientHandle clientId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        int overwrite);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr StorageGO_ReadChunk(
+        NativeTransferHandle transferId,
+        [Out] byte[] buffer,
+        uint capacity);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr StorageGO_WriteChunk(
+        NativeTransferHandle transferId,
+        [In] byte[] buffer,
+        uint count);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr StorageGO_FlushTransfer(NativeTransferHandle transferId);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr StorageGO_CloseTransfer(ulong transferId, int forceSync);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void StorageGO_FreeResult(IntPtr result);
