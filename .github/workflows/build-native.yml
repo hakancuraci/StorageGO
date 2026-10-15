@@ -51,21 +51,27 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
-      - name: Enable MinGW for CGO
+      - name: Install MSYS2 UCRT64 GCC
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+      - name: Configure GCC for Windows CGO
         shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
-          $candidates = @(
-            'C:\msys64\ucrt64\bin',
-            'C:\msys64\mingw64\bin',
-            'C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin'
-          )
-          $gccDirectory = $candidates |
-            Where-Object { Test-Path (Join-Path $_ 'gcc.exe') } |
-            Select-Object -First 1
-          if (-not $gccDirectory) {
-            throw 'MinGW GCC was not found on the Windows runner.'
+          $gccDirectory = Join-Path $env:MSYS2_LOCATION 'ucrt64\bin'
+          $compiler = Join-Path $gccDirectory 'gcc.exe'
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+            throw "MSYS2 setup completed but GCC is missing: $compiler"
           }
           $gccDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CC=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & $compiler --version
+          if ($LASTEXITCODE -ne 0) { throw 'GCC could not be executed.' }
       - name: Test Go code
         shell: pwsh
         env:
@@ -97,6 +103,8 @@ jobs:
           }
       - name: Verify .NET chunk interop
         shell: pwsh
+        env:
+          CGO_ENABLED: "1"
         run: ./tests/run-interop.ps1
       - uses: actions/upload-artifact@v7
         with:

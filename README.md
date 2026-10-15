@@ -211,6 +211,10 @@ manuel çalıştırmada şu artifact'leri üretir:
 Her iki platformda Go race testleri ve ABI header kontrolü, Windows'ta ayrıca
 .NET/native chunk aktarım testleri çalıştırılır.
 
+Windows job'ı `msys2/setup-msys2` ile UCRT64 GCC'yi kurar. Native test/build ve
+interop adımları, action'ın bildirdiği kurulum dizininden gelen PATH ve `CC`
+ayarlarını kullanır; runner'da önceden kurulu GCC veya sabit bir dizin varsayılmaz.
+
 Parolayı loglamayın veya exception mesajlarına eklemeyin. Kimlik bilgilerini
 güvenilir yapılandırmadan okuyun; client ve stream'leri deterministik olarak
 dispose edin.
