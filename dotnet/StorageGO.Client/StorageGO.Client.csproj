@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+    <PackageId>StorageGO.Client</PackageId>
+    <Description>.NET 8 wrapper for the StorageGO native SMB client.</Description>
+    <Authors>StorageGO</Authors>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" Link="README.md" />
+    <None Include="../../artifacts/win-x64/storagego.dll"
+          Pack="true" PackagePath="runtimes/win-x64/native/" Visible="false"
+          Link="runtimes/win-x64/native/storagego.dll" CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('../../artifacts/win-x64/storagego.dll')" />
+    <None Include="../../artifacts/linux-x64/libstoragego.so"
+          Pack="true" PackagePath="runtimes/linux-x64/native/" Visible="false"
+          Link="runtimes/linux-x64/native/libstoragego.so" CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('../../artifacts/linux-x64/libstoragego.so')" />
+  </ItemGroup>
+</Project>

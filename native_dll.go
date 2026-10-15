@@ -1,25 +1,34 @@
+//go:build cgo
+
 package main
 
 /*
 #include <stdlib.h>
+#include <stdint.h>
 */
 import "C"
 
-import (
-	"unsafe"
-)
+import "unsafe"
+
+//export StorageGO_CreateClient
+func StorageGO_CreateClient(configJSON *C.char) *C.char {
+	if configJSON == nil {
+		return C.CString(marshalCreateResponse(nativeCreateResponse{Success: false, Error: "configJSON NULL olamaz"}))
+	}
+	return C.CString(createNativeClientSafely(C.GoString(configJSON)))
+}
 
 //export StorageGO_Invoke
-func StorageGO_Invoke(requestJSON *C.char) *C.char {
+func StorageGO_Invoke(clientID C.uint64_t, requestJSON *C.char) *C.char {
 	if requestJSON == nil {
-		return C.CString(marshalNativeResponse(FileResponse{
-			Success: false,
-			Error:   "requestJSON NULL olamaz",
-		}))
+		return C.CString(marshalNativeResponse(failedFileResponse("requestJSON NULL olamaz")))
 	}
+	return C.CString(invokeNativeRequestSafely(uint64(clientID), C.GoString(requestJSON)))
+}
 
-	response := invokeNativeRequest(C.GoString(requestJSON))
-	return C.CString(marshalNativeResponse(response))
+//export StorageGO_CloseClient
+func StorageGO_CloseClient(clientID C.uint64_t) *C.char {
+	return C.CString(closeNativeClientSafely(uint64(clientID)))
 }
 
 //export StorageGO_FreeResult

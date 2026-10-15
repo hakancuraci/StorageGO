@@ -1,0 +1,8 @@
+artifacts/
+.tmp-pack/
+**/bin/
+**/obj/
+*.dll
+*.so
+*.h
+*.nupkg
