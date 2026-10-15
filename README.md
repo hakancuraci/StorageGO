@@ -32,19 +32,17 @@ using (var destination = File.Create("invoice.pdf"))
         @"invoices\2026\invoice.pdf", destination);
 }
 
-// Büyük dosyaları tamamen belleğe almadan yükleme.
-using (var source = File.OpenRead("result.pdf"))
-{
-    SmbWriteResult uploaded = client.Write(
-        @"outbox\result.pdf",
-        source,
-        new SmbWriteOptions
-        {
-            Overwrite = true,
-            ForceSync = true,
-            MimeType = "application/pdf"
-        });
-}
+// byte[] kaynağını yükleme.
+byte[] source = await File.ReadAllBytesAsync("result.pdf");
+SmbWriteResult uploaded = client.Write(
+    @"outbox\result.pdf",
+    source,
+    new SmbWriteOptions
+    {
+        Overwrite = true,
+        ForceSync = true,
+        MimeType = "application/pdf"
+    });
 ```
 
 `SmbClient.Create` yapılandırmayı doğrular. Ağ bağlantısı ilk dosya işleminde
@@ -63,6 +61,8 @@ SmbWriteResult result = client.Write(
 ```
 
 `Read` tüm içeriği bir `byte[]` olarak döndürür ve `MaxReadBytes` sınırına tabidir.
+`Write(path, byte[])` kaynak diziyi tamamen bellekte tutar; native katmana aktarım
+binary chunk'larla yapılır ve ek transfer buffer'ı chunk boyutuyla sınırlıdır.
 Stream metotları bu dosya boyutu sınırına tabi değildir. Büyük dosyalarda
 `CopyTo`, `Write(path, Stream)` veya `OpenRead`/`OpenWrite` kullanın.
 
@@ -72,6 +72,8 @@ Stream metotları bu dosya boyutu sınırına tabi değildir. Büyük dosyalarda
 
 ```csharp
 SmbFile Read(string remotePath);
+SmbWriteResult Write(string remotePath, byte[] source,
+    SmbWriteOptions? options = null);
 SmbWriteResult Write(string remotePath, ReadOnlyMemory<byte> content,
     SmbWriteOptions? options = null);
 Stream OpenRead(string remotePath);

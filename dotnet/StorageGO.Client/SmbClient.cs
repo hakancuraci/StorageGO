@@ -114,6 +114,15 @@ public sealed class SmbClient : ISmbClient
 
     public SmbWriteResult Write(
         string remotePath,
+        byte[] source,
+        SmbWriteOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        return Write(remotePath, source.AsMemory(), options);
+    }
+
+    public SmbWriteResult Write(
+        string remotePath,
         ReadOnlyMemory<byte> content,
         SmbWriteOptions? options = null)
     {

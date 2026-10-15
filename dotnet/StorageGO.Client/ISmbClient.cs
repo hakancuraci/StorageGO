@@ -28,6 +28,12 @@ public interface ISmbClient : IDisposable
         Stream destination,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Uploads a byte array in bounded binary chunks.</summary>
+    SmbWriteResult Write(
+        string remotePath,
+        byte[] source,
+        SmbWriteOptions? options = null);
+
     SmbWriteResult Write(
         string remotePath,
         ReadOnlyMemory<byte> content,

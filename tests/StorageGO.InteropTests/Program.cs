@@ -32,17 +32,31 @@ File.WriteAllBytes(sourcePath, data);
 
 var tests = new (string Name, Action Run)[]
 {
-    ("binary memory round trip uses chunk ABI", () =>
+    ("byte-array round trip uses chunk ABI and preserves memory overload", () =>
     {
         using var client = NewClient();
         var path = Path.Combine(directory, "Türkçe-çığ-📁.bin");
-        var written = client.Write(path, data.AsMemory(), new SmbWriteOptions { ForceSync = true });
+        var written = client.Write(remotePath: path, source: data, options: new SmbWriteOptions { ForceSync = true });
         Check(written.FileSize == data.Length && written.FileName == Path.GetFileName(path), "Write metadata differs.");
         var read = client.Read(path);
         Check(read.FileSize == data.Length && read.Content.AsSpan().SequenceEqual(data), "Binary round trip differs.");
         Throws<SmbException>(() => client.Write(path, new byte[] { 1 }.AsMemory()));
         client.Write(path, new byte[] { 4, 5 }.AsMemory(), new SmbWriteOptions { Overwrite = true });
         Check(File.ReadAllBytes(path).AsSpan().SequenceEqual(new byte[] { 4, 5 }), "Overwrite did not truncate.");
+    }),
+    ("byte-array null is rejected before overwrite and empty array creates an empty file", () =>
+    {
+        using var client = NewClient();
+        var path = Path.Combine(directory, "byte-array-null.bin");
+        File.WriteAllBytes(path, [9, 8, 7]);
+        byte[] source = null!;
+        var error = Throws<ArgumentNullException>(() => client.Write(path, source,
+            new SmbWriteOptions { Overwrite = true }));
+        Check(error.ParamName == "source", "Null validation did not identify source.");
+        Check(File.ReadAllBytes(path).AsSpan().SequenceEqual(new byte[] { 9, 8, 7 }), "Null array truncated the destination.");
+        Check(transferCount() == 0, "Null array opened a transfer.");
+        var result = client.Write(path, Array.Empty<byte>(), new SmbWriteOptions { Overwrite = true });
+        Check(result.FileSize == 0 && new FileInfo(path).Length == 0, "Empty array did not create an empty file.");
     }),
     ("array offsets, spans, zero counts and forward-only modes", () =>
     {
