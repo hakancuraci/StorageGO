@@ -60,7 +60,8 @@ func beginNativeAsync(requestJSON string, writeData []byte, count int, completio
 	// for malformed input; validation failures are delivered asynchronously.
 	var ownedData []byte
 	if count > 0 && count <= maxNativeChunkBytes && len(writeData) >= count {
-		ownedData = append([]byte(nil), writeData[:count]...)
+		ownedData = nativeBuffers.rent(count)
+		copy(ownedData, writeData[:count])
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	id := nextNativeAsyncID.Add(1)
@@ -69,6 +70,13 @@ func beginNativeAsync(requestJSON string, writeData []byte, count int, completio
 	nativeAsyncOperations.Unlock()
 
 	go func() {
+		var readBuffer []byte
+		defer func() {
+			// Borrowed callback data must stay live until foreign code returns,
+			// even though admission and operation registry entries end earlier.
+			nativeBuffers.giveBack(readBuffer)
+			nativeBuffers.giveBack(ownedData)
+		}()
 		// Native resources remain owned until I/O has really returned. In
 		// particular cancellation never fabricates an early completion for a
 		// read/write still using a buffer or file handle.
@@ -78,7 +86,7 @@ func beginNativeAsync(requestJSON string, writeData []byte, count int, completio
 			if err := json.Unmarshal([]byte(requestJSON), &request); err != nil {
 				return nativeTransferResponse{Error: "geçersiz async istek JSON"}
 			}
-			response, bytes := executeNativeAsync(ctx, request, ownedData, count)
+			response, bytes := executeNativeAsync(ctx, request, ownedData, count, &readBuffer)
 			data = bytes
 			return response
 		})
@@ -103,7 +111,7 @@ func cancelNativeAsync(id uint64) {
 	nativeAsyncOperations.Unlock()
 }
 
-func executeNativeAsync(ctx context.Context, request nativeAsyncRequest, writeData []byte, count int) (any, []byte) {
+func executeNativeAsync(ctx context.Context, request nativeAsyncRequest, writeData []byte, count int, readBuffer *[]byte) (any, []byte) {
 	// Close operations must release ownership even if already cancelled.
 	cleanup := request.Action == "closeTransfer" || request.Action == "closeClient"
 	if ctx.Err() != nil && !cleanup {
@@ -121,7 +129,8 @@ func executeNativeAsync(ctx context.Context, request nativeAsyncRequest, writeDa
 		if count < 1 || count > maxNativeChunkBytes {
 			return nativeChunkResponse{Error: "geçersiz async chunk boyutu (1..4 MiB)"}, nil
 		}
-		buffer := make([]byte, count)
+		buffer := nativeBuffers.rent(count)
+		*readBuffer = buffer // Keep ownership on failure, cancellation, and panic too.
 		chunk := readNativeChunkAsync(ctx, request.TransferID, buffer)
 		response = chunk
 		if chunk.Success {

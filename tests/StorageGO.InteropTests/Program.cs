@@ -7,7 +7,15 @@ if (args.Contains("--production-smoke"))
     Throws<ArgumentException>(() => client.OpenRead("file\0truncated.txt"));
     client.Dispose();
     Throws<ObjectDisposedException>(() => client.OpenRead("file.txt"));
-    Console.WriteLine("PASS production ABI version, client create/dispose and managed path validation");
+    await using var pool = PooledSmbClient.Create(new SmbClientOptions
+    {
+        Server = "localhost", ShareName = "fixture", Username = "fixture", Password = "unused"
+    });
+    Throws<ArgumentException>(() => pool.OpenRead("file\0truncated.txt"));
+    await pool.DisposeAsync();
+    Check(pool.GetStatistics().ClientsCreated == 1 && pool.GetStatistics().ActiveLeases == 0,
+        "Production pool did not create and release a client.");
+    Console.WriteLine("PASS production ABI version, standalone/pooled client lifecycle and managed path validation");
     return 0;
 }
 
@@ -270,6 +278,9 @@ try
     var asyncChecks = await AsyncChecks.RunAsync(directory, data, sourcePath, fixture, clientCount.Invoke, transferCount.Invoke);
     total += asyncChecks.Total;
     failures += asyncChecks.Failures;
+    var poolChecks = await PoolChecks.RunAsync(directory, fixture, clientCount.Invoke, transferCount.Invoke);
+    total += poolChecks.Total;
+    failures += poolChecks.Failures;
 }
 finally
 {

@@ -24,4 +24,7 @@ public sealed class SmbWriteOptions
 public sealed class SmbException : Exception
 {
     public SmbException(string message) : base(message) { }
+
+    /// <summary>True only when the native layer positively identifies a normal, reusable file error.</summary>
+    public bool ConnectionReusable { get; init; }
 }

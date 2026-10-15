@@ -24,4 +24,7 @@ public sealed class SmbClientOptions
 
     /// <summary>Maximum bytes transferred per native call, from 1 byte to 4 MiB.</summary>
     public int ChunkSizeBytes { get; init; } = 1024 * 1024;
+
+    /// <summary>Clears internal managed scratch arrays when returning them to the shared pool.</summary>
+    public bool ClearBuffersOnReturn { get; init; } = true;
 }

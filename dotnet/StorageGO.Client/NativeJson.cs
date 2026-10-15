@@ -36,11 +36,11 @@ internal static class NativeJson
         }
     }
 
-    internal static void EnsureSuccess(bool success, string? error)
+    internal static void EnsureSuccess(bool success, string? error, bool connectionReusable = false)
     {
         if (!success)
         {
-            throw new SmbException(error ?? "SMB operation failed.");
+            throw new SmbException(error ?? "SMB operation failed.") { ConnectionReusable = connectionReusable };
         }
     }
 
@@ -60,7 +60,8 @@ internal static class NativeJson
         long FileSize,
         string? MimeType,
         string? Error,
-        bool Cancelled = false) : IResponse;
+        bool Cancelled = false,
+        bool ConnectionReusable = false) : IResponse;
 
     internal sealed record ChunkResponse(
         bool Success,

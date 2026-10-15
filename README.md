@@ -69,6 +69,126 @@ chunk boyutuyla sınırlıdır. Stream metotları bu dosya boyutu sınırına ta
 değildir. Büyük dosyalarda `CopyToAsync`, `WriteAsync(path, Stream)` veya
 `OpenReadAsync`/`OpenWriteAsync` kullanın; senkron karşılıkları da korunur.
 
+## Yoğun API kullanımı: client havuzu
+
+`PooledSmbClient`, aynı `ISmbClient` arayüzünü uygular. Her dosya işlemi için
+havuzdan özel bir client alır ve işlem tamamlandığında geri verir. Kullanıcı
+kodunda `Rent`/`Return` yönetimi gerekmez. Tek native client'ın işlemleri
+sıralanırken, havuzdaki farklı client'lar bağımsız transferleri eşzamanlı yürütür.
+
+ASP.NET Core'da **havuzu singleton** kaydedin; request başına yeni havuz
+oluşturmayın. Örneğin `Program.cs` içinde:
+
+```csharp
+using StorageGO;
+
+builder.Services.AddSingleton<ISmbClient>(_ => PooledSmbClient.Create(
+    new SmbClientOptions
+    {
+        Server = builder.Configuration["Smb:Server"]!,
+        ShareName = builder.Configuration["Smb:ShareName"]!,
+        Username = builder.Configuration["Smb:Username"]!,
+        Password = builder.Configuration["Smb:Password"]!,
+        Domain = builder.Configuration["Smb:Domain"],
+        ChunkSizeBytes = 1024 * 1024,
+        ClearBuffersOnReturn = true
+    },
+    new SmbClientPoolOptions
+    {
+        MaxClients = 8,
+        MaxPendingAcquires = 32,
+        AcquireTimeout = TimeSpan.FromSeconds(2),
+        IdleTimeout = TimeSpan.FromMinutes(2)
+    }));
+```
+
+Servis içinde normal arayüzü kullanmaya devam edin:
+
+```csharp
+public sealed class DocumentStorage(ISmbClient client)
+{
+    public Task<SmbWriteResult> SaveAsync(
+        string path, byte[] source, CancellationToken cancellationToken) =>
+        client.WriteAsync(path, source,
+            new SmbWriteOptions { Overwrite = true }, cancellationToken);
+
+    public Task<SmbWriteResult> DownloadAsync(
+        string path, Stream destination, CancellationToken cancellationToken) =>
+        client.CopyToAsync(path, destination, cancellationToken);
+}
+```
+
+Enjekte edilen singleton client'ı request/servis metotlarında dispose etmeyin;
+yaşam döngüsünü uygulamanın DI container'ı yönetir. `OpenReadAsync` veya
+`OpenWriteAsync` ile aldığınız **stream'i ise mutlaka dispose edin**:
+
+```csharp
+await using Stream remote = await client.OpenReadAsync(path, cancellationToken);
+await remote.CopyToAsync(destination, cancellationToken);
+```
+
+Stream EOF'a ulaşsa bile kapanana kadar bir client'ı kirada tutar. Dolayısıyla
+`MaxClients`, aynı anda açık dosya transferlerini de sınırlar. Bir stream açıkken
+aynı havuzdan başka bir işlem bekletiyorsanız kapasite ihtiyacını hesaba katın;
+özellikle `MaxClients = 1` ile açık stream'i kapatmadan ikinci işlemi beklemeyin.
+
+Yukarıdaki değerler varsayılanlardır ve yük testi için başlangıç noktasıdır:
+
+- Client'lar ihtiyaç oldukça oluşturulur. TCP bağlantısı ve kimlik doğrulama ilk
+  dosya işleminde yapılır; havuz oluşturmak bağlantıları önceden ısıtmaz.
+- Kapasite dolunca en fazla `MaxPendingAcquires` istek bekler. Kuyruk da doluysa
+  `SmbClientPoolFullException` fırlatılır; `MaxPendingAcquires = 0` beklemeyi kapatır.
+- Client bekleme süresi dolarsa `TimeoutException`, bekleme iptal edilirse
+  `OperationCanceledException` döner. Bu durumlarda dosya işlemi başlatılmaz.
+  `AcquireTimeout`, aktif SMB I/O timeout'u değildir.
+- Boştaki client'lar `IdleTimeout` sonrasında periyodik temizlikle kapatılır.
+  Dosya bulunamadı/zaten var/erişim reddedildi gibi tanımlı normal dosya hataları
+  bağlantıyı korur. Bilinmeyen native hata, transfer iptali veya close hatasında
+  client ihtiyatlı biçimde çıkarılır; başarısız yazma otomatik tekrarlanmaz.
+- Havuz kapatılınca yeni işlemler reddedilir ve boştaki client'lar kapatılır.
+  `DisposeAsync`, uygulamanın açık tuttuğu stream'leri zorla kapatmaz veya onların
+  kapanmasını beklemez; bu stream'ler bittiğinde client'ları da kapatılır.
+- Her havuz tek sunucu/paylaşım/kimliğe aittir. Farklı kullanıcı/tenant kimlikleri
+  için ayrı havuz kullanın. Parola rotasyonunda yeni havuz oluşturup eski havuzu
+  kapatın; parolaları havuz anahtarlarına veya loglara koymayın.
+- Sınırlar süreç/havuz başınadır. API replica sayısı ve kimlik havuzu sayısı
+  arttığında NAS üzerindeki toplam bağlantı sayısı da artar.
+
+`PooledSmbClient.GetStatistics()`, aktif kiralama, bekleyen istek, boştaki client,
+oluşturulan/çıkarılan client, timeout, kuyruk reddi ve temizlik hatası sayaçlarının
+anlık görüntüsünü verir. Örneğin doğrudan havuz örneğiyle
+`var stats = pool.GetStatistics();` kullanılabilir. Bağlantı hataları mesaj metni
+üzerinden eşleştirilmez; native katmanın `ConnectionReusable` bilgisi kullanılır.
+Eski ABI v3 native dosyası bu alanı göndermiyorsa hatalı client güvenli varsayımla
+havuzdan çıkarılır.
+
+## Buffer havuzları
+
+.NET tarafında stream ve yardımcı transfer buffer'ları `ArrayPool<byte>` ile
+alınır ve transfer boyunca tekrar kullanılır; her chunk için yeni büyük dizi
+oluşturulmaz. Havuzdan gelen dizinin gerçek uzunluğu daha büyük olsa da yalnızca
+istenen chunk/count kadar veri kullanılır. `ClearBuffersOnReturn` varsayılan olarak
+`true` değerindedir; iç managed diziler iade edilirken temizlenir. Bunu kapatmak
+temizleme maliyetini azaltabilir fakat hassas verinin havuzda kalmasına izin verir.
+
+Go async tarafında 64 KiB, 256 KiB, 1 MiB ve 4 MiB sınıflı buffer havuzu kullanılır.
+Sınıf başına en fazla 16 buffer, toplamda en fazla **32 MiB boş native buffer**
+tutulur; iade edilen buffer'ların tüm kapasitesi temizlenir. Read callback verisi
+callback dönene kadar, write için sahipli kopya da işlem tamamlanana kadar
+korunur. İptal isteği client/buffer'ı erken serbest bırakmaz.
+
+Bu 32 MiB sınırı **toplam süreç belleği sınırı değildir**: kullanımda olan
+buffer'lar, .NET shared array pool, SMB/runtime buffer'ları, farklı havuzlar ve
+çağıranın dosya dizileri ayrıca bellek kullanır. Client havuzu eşzamanlı transfer
+sayısını sınırlar; .NET ve Go bellek tüketimini birlikte izleyin. `ReadAsync`
+sonucu yine dosyanın tamamını bellekte tutar; büyük dosyada streaming tercih edin.
+
+Kullanıcının verdiği kaynak `byte[]` ve `Read`/`ReadAsync` ile dönen `Content`
+dizileri iç havuzlara iade edilmez. Kaynak diziyi `WriteAsync` tamamlanmadan
+değiştirmeyin veya kendi havuzunuza geri vermeyin. Buffer havuzu allocation/GC
+yükünü azaltır; gereksiz kopyaları otomatik olarak kaldırmaz veya ağ hızında
+belirli bir artışı garanti etmez.
+
 ## Stream ve chunk davranışı
 
 `ISmbClient`, `IDisposable` ve `IAsyncDisposable` üzerinden kapatılabilir. Async
@@ -195,7 +315,7 @@ sınıra gelince yeni işlem reddedilir, sınırsız kuyruk oluşturulmaz.
 
 ## Native ABI v3
 
-.NET wrapper 1.1.0, async binary chunk ABI v3 gerektirir; wrapper ile native
+.NET wrapper 1.2.0, async binary chunk ABI v3 gerektirir; wrapper ile native
 dosyaları birlikte güncelleyin. ABI v1/v2 DLL/SO dosyası yeni wrapper ile
 kullanılamaz. Eski
 `StorageGO_CreateClient`, `StorageGO_Invoke`, `StorageGO_CloseClient` ve
@@ -271,11 +391,23 @@ PowerShell 7 gerekir:
 pwsh -File ./tests/run-interop.ps1
 ```
 
+Client havuzu testleri; kapasite/kuyruk sınırlarını, timeout ve cancellation'ı,
+stream kiralama ömrünü, hata/idle durumunda client çıkarmayı ve eşzamanlı payload
+bütünlüğünü de doğrular. Buffer testleri iade, temizleme, boyut ve callback
+sahipliği kurallarını kapsar. Bunlar gerçek NAS performans benchmark'ı değildir.
+
 Bu testler gerçek P/Invoke ve completion callback üzerinden üretimde kullanılan
 chunk yönetimini yerel dosyalarla doğrular; SMB sunucusu veya kimlik bilgisi
 gerektirmez. Test kütüphanesi ayrı bir dizine üretilir ve yalnızca test
 uygulamasında yüklenir. Gerçek SMB
 sunucusuyla ağ ve kimlik doğrulama entegrasyon testlerinin yerini tutmaz.
+
+Go buffer havuzunun allocation mikro-benchmark'ı ayrıca çalıştırılabilir (NAS/ağ
+throughput ölçümü değildir):
+
+```powershell
+go test -run '^$' -bench BenchmarkNativeBufferAllocation -benchmem
+```
 
 ## GitHub Actions çıktıları
 

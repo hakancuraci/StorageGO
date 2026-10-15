@@ -34,7 +34,7 @@ try {
     $env:GOOS = if ($runningOnWindows) { 'windows' } else { 'linux' }
     $env:GOARCH = 'amd64'
     New-Item -ItemType Directory -Force $fixtureSource, $fixtureOutput | Out-Null
-    foreach ($source in @('go.mod', 'go.sum', 'main.go', 'smb_client.go', 'native_api.go', 'native_stream.go', 'native_async.go', 'native_async_dll.go')) {
+    foreach ($source in @('go.mod', 'go.sum', 'main.go', 'smb_client.go', 'native_api.go', 'native_stream.go', 'native_async.go', 'native_async_dll.go', 'native_buffers.go', 'native_errors.go')) {
         Copy-Item -LiteralPath (Join-Path $repoRoot $source) -Destination (Join-Path $fixtureSource $source)
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'nativefixture/exports.go') -Destination (Join-Path $fixtureSource 'exports.go')

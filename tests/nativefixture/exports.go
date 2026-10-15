@@ -129,7 +129,7 @@ func fixtureOpenContext(ctx context.Context, clientID uint64, name string, reada
 	}
 	file, err := os.OpenFile(name, flags, 0o600)
 	if err != nil {
-		return nativeTransferResponse{Error: err.Error()}
+		return nativeTransferResponse{Error: err.Error(), ConnectionReusable: reusableNativeFileError(err)}
 	}
 	info, err := file.Stat()
 	if err != nil || info.IsDir() {

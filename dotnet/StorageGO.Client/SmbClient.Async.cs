@@ -16,12 +16,12 @@ public sealed partial class SmbClient
         {
             if (source.FileSize > _maxReadBytes) throw ReadLimitExceeded();
             using var destination = new MemoryStream(checked((int)Math.Max(0, source.FileSize)));
-            var buffer = new byte[_chunkSize];
+            using var rented = new PooledBuffer(_chunkSize, _clearBuffersOnReturn);
             int count;
-            while ((count = await source.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) != 0)
+            while ((count = await source.ReadAsync(rented.Memory, cancellationToken).ConfigureAwait(false)) != 0)
             {
                 if (destination.Length > _maxReadBytes - count) throw ReadLimitExceeded();
-                await destination.WriteAsync(buffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+                await destination.WriteAsync(rented.Memory[..count], cancellationToken).ConfigureAwait(false);
             }
 
             return new SmbFile(source.FileName, destination.Length, source.MimeType, destination.ToArray());
@@ -36,12 +36,12 @@ public sealed partial class SmbClient
         var stream = await OpenAsync(remotePath, null, cancellationToken).ConfigureAwait(false);
         return await WithStreamAsync(stream, async source =>
         {
-            var buffer = new byte[_chunkSize];
+            using var rented = new PooledBuffer(_chunkSize, _clearBuffersOnReturn);
             long transferred = 0;
             int count;
-            while ((count = await source.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) != 0)
+            while ((count = await source.ReadAsync(rented.Memory, cancellationToken).ConfigureAwait(false)) != 0)
             {
-                await destination.WriteAsync(buffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+                await destination.WriteAsync(rented.Memory[..count], cancellationToken).ConfigureAwait(false);
                 transferred = checked(transferred + count);
             }
 
@@ -75,13 +75,13 @@ public sealed partial class SmbClient
         var stream = await OpenAsync(remotePath, options ?? new SmbWriteOptions(), cancellationToken).ConfigureAwait(false);
         return await WithStreamAsync(stream, async destination =>
         {
-            var buffer = new byte[_chunkSize];
+            using var rented = new PooledBuffer(_chunkSize, _clearBuffersOnReturn);
             while (true)
             {
-                var count = await source.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+                var count = await source.ReadAsync(rented.Memory, cancellationToken).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
                 if (count == 0) break;
-                await destination.WriteAsync(buffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+                await destination.WriteAsync(rented.Memory[..count], cancellationToken).ConfigureAwait(false);
             }
 
             return new SmbWriteResult(destination.FileName, destination.BytesTransferred, destination.MimeType);
@@ -112,7 +112,7 @@ public sealed partial class SmbClient
                 new(options is null ? "openRead" : "openWrite", ClientId: _handle.Id,
                     Path: remotePath, Overwrite: options?.Overwrite ?? false),
                 _handle, cancellationToken: cancellationToken).ConfigureAwait(false);
-            NativeJson.EnsureSuccess(response.Success, response.Error);
+            NativeJson.EnsureSuccess(response.Success, response.Error, response.ConnectionReusable);
             // Keep the client gate until the transfer has acquired its independent native client reference.
             return CreateStream(response, remotePath, options);
         }

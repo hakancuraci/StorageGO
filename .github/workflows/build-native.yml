@@ -37,7 +37,7 @@ jobs:
           for symbol in StorageGO_ABIVersion StorageGO_CreateClient StorageGO_Invoke StorageGO_CloseClient StorageGO_FreeResult StorageGO_OpenRead StorageGO_OpenWrite StorageGO_ReadChunk StorageGO_WriteChunk StorageGO_FlushTransfer StorageGO_CloseTransfer StorageGO_BeginAsync StorageGO_CancelAsync StorageGO_ReleaseClient StorageGO_ReleaseTransfer; do
             grep -Fq "${symbol}(" artifacts/linux-x64/libstoragego.h || { echo "Missing ABI declaration: ${symbol}"; exit 1; }
           done
-      - name: Verify .NET sync and async chunk interop
+      - name: Verify .NET sync, async and pool interop
         shell: pwsh
         env:
           CGO_ENABLED: "1"
@@ -111,7 +111,7 @@ jobs:
               throw "Missing ABI declaration: $symbol"
             }
           }
-      - name: Verify .NET sync and async chunk interop
+      - name: Verify .NET sync, async and pool interop
         shell: pwsh
         env:
           CGO_ENABLED: "1"

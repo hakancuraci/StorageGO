@@ -8,6 +8,7 @@ public sealed partial class SmbClient : ISmbClient
     private readonly NativeClientHandle _handle;
     private readonly int _chunkSize;
     private readonly long _maxReadBytes;
+    private readonly bool _clearBuffersOnReturn;
     private bool _disposed;
 
     private SmbClient(NativeClientHandle handle, SmbClientOptions options)
@@ -15,6 +16,7 @@ public sealed partial class SmbClient : ISmbClient
         _handle = handle;
         _chunkSize = options.ChunkSizeBytes;
         _maxReadBytes = Math.Min(options.MaxReadBytes, Array.MaxLength);
+        _clearBuffersOnReturn = options.ClearBuffersOnReturn;
     }
 
     public static ISmbClient Create(SmbClientOptions options)
@@ -62,9 +64,10 @@ public sealed partial class SmbClient : ISmbClient
             }
 
             using var destination = new MemoryStream(checked((int)Math.Max(0, source.FileSize)));
-            var buffer = new byte[_chunkSize];
+            using var rented = new PooledBuffer(_chunkSize, _clearBuffersOnReturn);
+            var buffer = rented.Array;
             int count;
-            while ((count = source.Read(buffer, 0, buffer.Length)) != 0)
+            while ((count = source.Read(buffer, 0, _chunkSize)) != 0)
             {
                 if (destination.Length > _maxReadBytes - count)
                 {
@@ -92,12 +95,13 @@ public sealed partial class SmbClient : ISmbClient
         cancellationToken.ThrowIfCancellationRequested();
         return WithStream(Open(remotePath, writeOptions: null), source =>
         {
-            var buffer = new byte[_chunkSize];
+            using var rented = new PooledBuffer(_chunkSize, _clearBuffersOnReturn);
+            var buffer = rented.Array;
             long transferred = 0;
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var count = source.Read(buffer, 0, buffer.Length);
+                var count = source.Read(buffer, 0, _chunkSize);
                 cancellationToken.ThrowIfCancellationRequested();
                 if (count == 0)
                 {
@@ -148,11 +152,12 @@ public sealed partial class SmbClient : ISmbClient
         cancellationToken.ThrowIfCancellationRequested();
         return WithStream(Open(remotePath, options ?? new SmbWriteOptions()), destination =>
         {
-            var buffer = new byte[_chunkSize];
+            using var rented = new PooledBuffer(_chunkSize, _clearBuffersOnReturn);
+            var buffer = rented.Array;
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var count = source.Read(buffer, 0, buffer.Length);
+                var count = source.Read(buffer, 0, _chunkSize);
                 cancellationToken.ThrowIfCancellationRequested();
                 if (count == 0)
                 {
@@ -194,7 +199,7 @@ public sealed partial class SmbClient : ISmbClient
             var response = NativeJson.Invoke<NativeJson.OpenResponse>(() => writeOptions is null
                 ? NativeMethods.StorageGO_OpenRead(_handle, remotePath)
                 : NativeMethods.StorageGO_OpenWrite(_handle, remotePath, writeOptions.Overwrite ? 1 : 0));
-            NativeJson.EnsureSuccess(response.Success, response.Error);
+            NativeJson.EnsureSuccess(response.Success, response.Error, response.ConnectionReusable);
             return CreateStream(response, remotePath, writeOptions);
         }
         finally { _gate.Release(); }
@@ -209,7 +214,7 @@ public sealed partial class SmbClient : ISmbClient
         try
         {
             transfer = new NativeTransferHandle(response.TransferId, _handle);
-            return new NativeSmbStream(transfer, _chunkSize,
+            return new NativeSmbStream(transfer, _chunkSize, _clearBuffersOnReturn,
                 readable: writeOptions is null,
                 forceSync: writeOptions?.ForceSync ?? false,
                 inferMime: writeOptions is not null && string.IsNullOrEmpty(writeOptions.MimeType),
@@ -273,7 +278,7 @@ public sealed partial class SmbClient : ISmbClient
         }
     }
 
-    private static void Validate(SmbClientOptions options)
+    internal static void Validate(SmbClientOptions options)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(options.Server);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ShareName);

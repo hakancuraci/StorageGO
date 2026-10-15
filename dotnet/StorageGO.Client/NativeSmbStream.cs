@@ -8,21 +8,23 @@ internal sealed class NativeSmbStream : Stream
     private readonly int _chunkSize;
     private readonly bool _readable;
     private readonly bool _forceSync;
+    private readonly bool _clearBuffersOnReturn;
     private readonly byte[]? _mimePrefix;
     private int _mimePrefixLength;
-    private byte[]? _buffer;
+    private PooledBuffer? _buffer;
     private long _position;
     private bool _eof;
     private bool _faulted;
     private bool _disposed;
 
-    internal NativeSmbStream(NativeTransferHandle handle, int chunkSize, bool readable, bool forceSync,
+    internal NativeSmbStream(NativeTransferHandle handle, int chunkSize, bool clearBuffersOnReturn, bool readable, bool forceSync,
         bool inferMime, string fileName, long fileSize, string mimeType)
     {
         _handle = handle;
         _chunkSize = chunkSize;
         _readable = readable;
         _forceSync = forceSync;
+        _clearBuffersOnReturn = clearBuffersOnReturn;
         _mimePrefix = inferMime && mimeType == "application/octet-stream" ? new byte[8] : null;
         FileName = fileName;
         FileSize = fileSize;
@@ -180,11 +182,11 @@ internal sealed class NativeSmbStream : Stream
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bufferSize);
         if (!CanRead) { EnsureReadable(); }
         if (!destination.CanWrite) throw new ArgumentException("The destination must be writable.", nameof(destination));
-        var buffer = new byte[Math.Min(bufferSize, _chunkSize)];
+        using var rented = new PooledBuffer(Math.Min(bufferSize, _chunkSize), _clearBuffersOnReturn);
         int read;
-        while ((read = await ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) != 0)
+        while ((read = await ReadAsync(rented.Memory, cancellationToken).ConfigureAwait(false)) != 0)
         {
-            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+            await destination.WriteAsync(rented.Memory[..read], cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -196,6 +198,7 @@ internal sealed class NativeSmbStream : Stream
         {
             if (_disposed) return;
             _disposed = true;
+            _buffer?.Dispose();
             _buffer = null;
             try { _handle.CloseChecked(_forceSync && !_readable && !_faulted); }
             catch when (_faulted) { /* Preserve an earlier transfer failure during cleanup. */ }
@@ -211,6 +214,7 @@ internal sealed class NativeSmbStream : Stream
         {
             if (_disposed) return;
             _disposed = true;
+            _buffer?.Dispose();
             _buffer = null;
             try { await _handle.CloseCheckedAsync(_forceSync && !_readable && !_faulted).ConfigureAwait(false); }
             catch when (_faulted) { /* Preserve an earlier transfer failure during cleanup. */ }
@@ -237,7 +241,7 @@ internal sealed class NativeSmbStream : Stream
 
     public override long Seek(long offset, SeekOrigin origin) => throw ForwardOnly();
     public override void SetLength(long value) => throw ForwardOnly();
-    private byte[] Buffer => _buffer ??= new byte[_chunkSize];
+    private byte[] Buffer => (_buffer ??= new PooledBuffer(_chunkSize, _clearBuffersOnReturn)).Array;
 
     private int ReadChunk(byte[] buffer, int capacity)
     {

@@ -21,12 +21,13 @@ const (
 // Only control information crosses the ABI as JSON. File bytes are read/written
 // directly in the caller-owned buffer, which is never retained after a call.
 type nativeTransferResponse struct {
-	Success    bool   `json:"success"`
-	TransferID uint64 `json:"transferId,omitempty"`
-	FileName   string `json:"fileName,omitempty"`
-	FileSize   int64  `json:"fileSize"`
-	MimeType   string `json:"mimeType,omitempty"`
-	Error      string `json:"error,omitempty"`
+	ConnectionReusable bool   `json:"connectionReusable,omitempty"`
+	Success            bool   `json:"success"`
+	TransferID         uint64 `json:"transferId,omitempty"`
+	FileName           string `json:"fileName,omitempty"`
+	FileSize           int64  `json:"fileSize"`
+	MimeType           string `json:"mimeType,omitempty"`
+	Error              string `json:"error,omitempty"`
 }
 
 type nativeChunkResponse struct {
@@ -127,10 +128,11 @@ func openNativeTransferContext(ctx context.Context, clientID uint64, remotePath 
 	if err != nil {
 		// Do not reset a session underneath unrelated open transfers, and do not
 		// retry a create/truncate whose outcome is unknown after a network error.
-		if len(client.transfers) == 0 {
+		reusable := reusableNativeFileError(err)
+		if !reusable && len(client.transfers) == 0 {
 			client.resetLocked()
 		}
-		return nativeTransferResponse{Error: fmt.Sprintf("dosya açılamadı: %v", err)}
+		return nativeTransferResponse{Error: fmt.Sprintf("dosya açılamadı: %v", err), ConnectionReusable: reusable}
 	}
 
 	info, err := file.Stat()
