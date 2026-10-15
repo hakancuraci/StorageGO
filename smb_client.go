@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -97,6 +98,10 @@ func (c *nativeSMBClient) endpoint() string {
 }
 
 func (c *nativeSMBClient) connectLocked() (*smb2.Share, error) {
+	return c.connectLockedContext(context.Background())
+}
+
+func (c *nativeSMBClient) connectLockedContext(ctx context.Context) (*smb2.Share, error) {
 	if c.closed {
 		return nil, errors.New("client kapatıldı")
 	}
@@ -104,19 +109,20 @@ func (c *nativeSMBClient) connectLocked() (*smb2.Share, error) {
 		return c.share, nil
 	}
 
-	conn, err := net.DialTimeout("tcp", c.endpoint(), time.Duration(c.config.DialTimeoutSeconds)*time.Second)
+	tcpDialer := net.Dialer{Timeout: time.Duration(c.config.DialTimeoutSeconds) * time.Second}
+	conn, err := tcpDialer.DialContext(ctx, "tcp", c.endpoint())
 	if err != nil {
 		return nil, fmt.Errorf("SMB sunucusuna bağlanılamadı: %w", err)
 	}
 	dialer := &smb2.Dialer{Initiator: &smb2.NTLMInitiator{
 		User: c.config.Username, Password: c.config.Password, Domain: c.config.Domain,
 	}}
-	session, err := dialer.Dial(conn)
+	session, err := dialer.DialContext(ctx, conn)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("SMB kimlik doğrulaması başarısız: %w", err)
 	}
-	share, err := session.Mount(c.config.ShareName)
+	share, err := session.WithContext(ctx).Mount(c.config.ShareName)
 	if err != nil {
 		_ = session.Logoff()
 		_ = conn.Close()

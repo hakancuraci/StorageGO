@@ -80,7 +80,6 @@ var tests = new (string Name, Action Run)[]
         Throws<NotSupportedException>(() => input.Write(new byte[] { 1 }, 0, 1));
         Throws<NotSupportedException>(() => _ = input.Length);
         Throws<NotSupportedException>(() => input.Seek(0, SeekOrigin.Begin));
-        Throws<NotSupportedException>(() => input.ReadAsync(new byte[1], 0, 1).GetAwaiter().GetResult());
         using var received = new MemoryStream();
         var buffer = new byte[150_013];
         for (var iteration = 0; ; iteration++)
@@ -250,6 +249,7 @@ var tests = new (string Name, Action Run)[]
 };
 
 var failures = 0;
+var total = tests.Length;
 try
 {
     foreach (var test in tests)
@@ -266,13 +266,17 @@ try
             Console.Error.WriteLine("FAIL " + test.Name + Environment.NewLine + exception);
         }
     }
+
+    var asyncChecks = await AsyncChecks.RunAsync(directory, data, sourcePath, fixture, clientCount.Invoke, transferCount.Invoke);
+    total += asyncChecks.Total;
+    failures += asyncChecks.Failures;
 }
 finally
 {
     Directory.Delete(directory, recursive: true);
 }
 
-Console.WriteLine($"{tests.Length - failures}/{tests.Length} interop checks passed.");
+Console.WriteLine($"{total - failures}/{total} interop checks passed.");
 return failures == 0 ? 0 : 1;
 
 static ISmbClient NewClient(int chunkSize = 65_539, long maxReadBytes = 16 * 1024 * 1024) =>

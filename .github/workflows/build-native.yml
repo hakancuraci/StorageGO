@@ -17,6 +17,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
       - name: Test Go code
         env:
           CGO_ENABLED: "1"
@@ -31,9 +34,14 @@ jobs:
           go build -trimpath -buildmode=c-shared -o artifacts/linux-x64/libstoragego.so .
       - name: Verify chunk ABI header
         run: |
-          for symbol in StorageGO_ABIVersion StorageGO_CreateClient StorageGO_Invoke StorageGO_CloseClient StorageGO_FreeResult StorageGO_OpenRead StorageGO_OpenWrite StorageGO_ReadChunk StorageGO_WriteChunk StorageGO_FlushTransfer StorageGO_CloseTransfer; do
+          for symbol in StorageGO_ABIVersion StorageGO_CreateClient StorageGO_Invoke StorageGO_CloseClient StorageGO_FreeResult StorageGO_OpenRead StorageGO_OpenWrite StorageGO_ReadChunk StorageGO_WriteChunk StorageGO_FlushTransfer StorageGO_CloseTransfer StorageGO_BeginAsync StorageGO_CancelAsync StorageGO_ReleaseClient StorageGO_ReleaseTransfer; do
             grep -Fq "${symbol}(" artifacts/linux-x64/libstoragego.h || { echo "Missing ABI declaration: ${symbol}"; exit 1; }
           done
+      - name: Verify .NET sync and async chunk interop
+        shell: pwsh
+        env:
+          CGO_ENABLED: "1"
+        run: ./tests/run-interop.ps1
       - uses: actions/upload-artifact@v7
         with:
           name: storagego-linux-x64
@@ -94,14 +102,16 @@ jobs:
             'StorageGO_ABIVersion', 'StorageGO_CreateClient', 'StorageGO_Invoke',
             'StorageGO_CloseClient', 'StorageGO_FreeResult', 'StorageGO_OpenRead',
             'StorageGO_OpenWrite', 'StorageGO_ReadChunk', 'StorageGO_WriteChunk',
-            'StorageGO_FlushTransfer', 'StorageGO_CloseTransfer'
+            'StorageGO_FlushTransfer', 'StorageGO_CloseTransfer',
+            'StorageGO_BeginAsync', 'StorageGO_CancelAsync',
+            'StorageGO_ReleaseClient', 'StorageGO_ReleaseTransfer'
           )
           foreach ($symbol in $symbols) {
             if ($header -notmatch "\b$symbol\(") {
               throw "Missing ABI declaration: $symbol"
             }
           }
-      - name: Verify .NET chunk interop
+      - name: Verify .NET sync and async chunk interop
         shell: pwsh
         env:
           CGO_ENABLED: "1"

@@ -2,9 +2,9 @@ using System.Text.Json;
 
 namespace StorageGO;
 
-public sealed class SmbClient : ISmbClient
+public sealed partial class SmbClient : ISmbClient
 {
-    private readonly object _gate = new();
+    private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly NativeClientHandle _handle;
     private readonly int _chunkSize;
     private readonly long _maxReadBytes;
@@ -168,7 +168,8 @@ public sealed class SmbClient : ISmbClient
 
     public void Dispose()
     {
-        lock (_gate)
+        _gate.Wait();
+        try
         {
             if (_disposed)
             {
@@ -177,68 +178,62 @@ public sealed class SmbClient : ISmbClient
 
             _disposed = true;
             // Transfer handles retain a native reference until their streams are closed.
-            _handle.Dispose();
+            _handle.DisposeChecked();
         }
+        finally { _gate.Release(); }
     }
 
     private NativeSmbStream Open(string remotePath, SmbWriteOptions? writeOptions)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(remotePath);
-        if (remotePath.Contains('\0'))
-        {
-            throw new ArgumentException("Remote paths cannot contain a null character.", nameof(remotePath));
-        }
+        ValidatePath(remotePath);
 
-        lock (_gate)
+        _gate.Wait();
+        try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             var response = NativeJson.Invoke<NativeJson.OpenResponse>(() => writeOptions is null
                 ? NativeMethods.StorageGO_OpenRead(_handle, remotePath)
                 : NativeMethods.StorageGO_OpenWrite(_handle, remotePath, writeOptions.Overwrite ? 1 : 0));
             NativeJson.EnsureSuccess(response.Success, response.Error);
-            if (response.TransferId == 0)
-            {
-                throw new SmbException("Native SMB layer returned an invalid transfer ID.");
-            }
-
-            NativeTransferHandle? transfer = null;
-            try
-            {
-                transfer = new NativeTransferHandle(response.TransferId, _handle);
-                return new NativeSmbStream(
-                    transfer,
-                    _chunkSize,
-                    readable: writeOptions is null,
-                    forceSync: writeOptions?.ForceSync ?? false,
-                    inferMime: writeOptions is not null && string.IsNullOrEmpty(writeOptions.MimeType),
-                    response.FileName ?? remotePath.Replace('\\', '/').Split('/')[^1],
-                    response.FileSize,
-                    !string.IsNullOrEmpty(writeOptions?.MimeType)
-                        ? writeOptions.MimeType
-                        : response.MimeType ?? "application/octet-stream");
-            }
-            catch
-            {
-                if (transfer is not null)
-                {
-                    transfer.Dispose();
-                }
-                else
-                {
-                    try
-                    {
-                        NativeJson.Invoke<NativeJson.StatusResponse>(() =>
-                            NativeMethods.StorageGO_CloseTransfer(response.TransferId, 0));
-                    }
-                    catch
-                    {
-                        // Preserve the allocation/handle failure; native client disposal also cleans transfers.
-                    }
-                }
-
-                throw;
-            }
+            return CreateStream(response, remotePath, writeOptions);
         }
+        finally { _gate.Release(); }
+    }
+
+    private NativeSmbStream CreateStream(NativeJson.OpenResponse response, string remotePath, SmbWriteOptions? writeOptions)
+    {
+        if (response.TransferId == 0)
+            throw new SmbException("Native SMB layer returned an invalid transfer ID.");
+
+        NativeTransferHandle? transfer = null;
+        try
+        {
+            transfer = new NativeTransferHandle(response.TransferId, _handle);
+            return new NativeSmbStream(transfer, _chunkSize,
+                readable: writeOptions is null,
+                forceSync: writeOptions?.ForceSync ?? false,
+                inferMime: writeOptions is not null && string.IsNullOrEmpty(writeOptions.MimeType),
+                response.FileName ?? remotePath.Replace('\\', '/').Split('/')[^1], response.FileSize,
+                !string.IsNullOrEmpty(writeOptions?.MimeType)
+                    ? writeOptions.MimeType : response.MimeType ?? "application/octet-stream");
+        }
+        catch
+        {
+            if (transfer is not null) transfer.Dispose();
+            else
+            {
+                try { NativeMethods.StorageGO_ReleaseTransfer(response.TransferId); }
+                catch { /* Preserve the construction failure. */ }
+            }
+            throw;
+        }
+    }
+
+    private static void ValidatePath(string remotePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(remotePath);
+        if (remotePath.Contains('\0'))
+            throw new ArgumentException("Remote paths cannot contain a null character.", nameof(remotePath));
     }
 
     private SmbException ReadLimitExceeded() => new(
@@ -267,14 +262,14 @@ public sealed class SmbClient : ISmbClient
         try
         {
             var version = NativeMethods.StorageGO_ABIVersion();
-            if (version != 2)
+            if (version != 3)
             {
-                throw new NotSupportedException($"StorageGO native ABI 2 is required; loaded ABI {version}.");
+                throw new NotSupportedException($"StorageGO native ABI 3 is required; loaded ABI {version}.");
             }
         }
         catch (EntryPointNotFoundException exception)
         {
-            throw new NotSupportedException("The native StorageGO library is outdated. Deploy a library with chunk ABI 2.", exception);
+            throw new NotSupportedException("The native StorageGO library is outdated. Deploy a library with async ABI 3.", exception);
         }
     }
 

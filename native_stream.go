@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +14,7 @@ import (
 )
 
 const (
-	nativeABIVersion    = 2
+	nativeABIVersion    = 3
 	maxNativeChunkBytes = 4 * 1024 * 1024
 )
 
@@ -94,6 +95,10 @@ func openNativeWrite(clientID uint64, remotePath string, overwrite bool) nativeT
 }
 
 func openNativeTransfer(clientID uint64, remotePath string, readable, overwrite bool) nativeTransferResponse {
+	return openNativeTransferContext(context.Background(), clientID, remotePath, readable, overwrite)
+}
+
+func openNativeTransferContext(ctx context.Context, clientID uint64, remotePath string, readable, overwrite bool) nativeTransferResponse {
 	if strings.TrimSpace(remotePath) == "" || strings.ContainsRune(remotePath, '\x00') {
 		return nativeTransferResponse{Error: "path boş olamaz veya NULL karakteri içeremez"}
 	}
@@ -103,8 +108,11 @@ func openNativeTransfer(clientID uint64, remotePath string, readable, overwrite 
 	}
 	client.opMu.Lock()
 	defer client.opMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nativeTransferResponse{Error: err.Error()}
+	}
 
-	share, err := client.connectLocked()
+	share, err := client.connectLockedContext(ctx)
 	if err != nil {
 		return nativeTransferResponse{Error: err.Error()}
 	}
@@ -166,6 +174,10 @@ func validateNativeChunk(buffer []byte) error {
 }
 
 func readNativeChunk(transferID uint64, buffer []byte) nativeChunkResponse {
+	return readNativeChunkAsync(context.Background(), transferID, buffer)
+}
+
+func readNativeChunkAsync(ctx context.Context, transferID uint64, buffer []byte) nativeChunkResponse {
 	if err := validateNativeChunk(buffer); err != nil {
 		return nativeChunkResponse{Error: err.Error()}
 	}
@@ -175,6 +187,9 @@ func readNativeChunk(transferID uint64, buffer []byte) nativeChunkResponse {
 	}
 	transfer.client.opMu.Lock()
 	defer transfer.client.opMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nativeChunkResponse{Error: err.Error()}
+	}
 	if transfer.closed || transfer.client.closed {
 		return nativeChunkResponse{Error: "transfer kapatıldı"}
 	}
@@ -196,6 +211,10 @@ func readNativeChunk(transferID uint64, buffer []byte) nativeChunkResponse {
 }
 
 func writeNativeChunk(transferID uint64, buffer []byte) nativeChunkResponse {
+	return writeNativeChunkAsync(context.Background(), transferID, buffer)
+}
+
+func writeNativeChunkAsync(ctx context.Context, transferID uint64, buffer []byte) nativeChunkResponse {
 	if err := validateNativeChunk(buffer); err != nil {
 		return nativeChunkResponse{Error: err.Error()}
 	}
@@ -205,6 +224,9 @@ func writeNativeChunk(transferID uint64, buffer []byte) nativeChunkResponse {
 	}
 	transfer.client.opMu.Lock()
 	defer transfer.client.opMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nativeChunkResponse{Error: err.Error()}
+	}
 	if transfer.closed || transfer.client.closed {
 		return nativeChunkResponse{Error: "transfer kapatıldı"}
 	}
@@ -226,12 +248,19 @@ func writeNativeChunk(transferID uint64, buffer []byte) nativeChunkResponse {
 }
 
 func flushNativeTransfer(transferID uint64) nativeTransferResponse {
+	return flushNativeTransferAsync(context.Background(), transferID)
+}
+
+func flushNativeTransferAsync(ctx context.Context, transferID uint64) nativeTransferResponse {
 	transfer, found := getNativeTransfer(transferID)
 	if !found {
 		return nativeTransferResponse{Error: "transfer bulunamadı veya kapatıldı"}
 	}
 	transfer.client.opMu.Lock()
 	defer transfer.client.opMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nativeTransferResponse{Error: err.Error()}
+	}
 	if transfer.closed || transfer.client.closed {
 		return nativeTransferResponse{Error: "transfer kapatıldı"}
 	}

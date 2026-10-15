@@ -61,6 +61,26 @@ internal static class NativeMethods
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void StorageGO_FreeResult(IntPtr result);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void Completion(ulong token, IntPtr json, IntPtr readData, uint dataLength);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern ulong StorageGO_BeginAsync(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string requestJson,
+        [In] byte[]? writeBuffer,
+        uint count,
+        Completion completion,
+        ulong token);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void StorageGO_CancelAsync(ulong operationId);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void StorageGO_ReleaseClient(ulong clientId);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void StorageGO_ReleaseTransfer(ulong transferId);
+
     private static IntPtr ResolveLibrary(
         string libraryName,
         Assembly assembly,

@@ -11,41 +11,79 @@ internal sealed class NativeTransferHandle : SafeHandleZeroOrMinusOneIsInvalid
     {
         _client = client;
         _client.DangerousAddRef(ref _clientReferenceHeld);
+        _client.TransferOpened();
         SetHandle(unchecked((IntPtr)(long)transferId));
     }
 
+    internal ulong Id => unchecked((ulong)handle.ToInt64());
+
     internal void CloseChecked(bool forceSync)
     {
+        var closeFailed = false;
         try
         {
             var response = NativeJson.Invoke<NativeJson.StatusResponse>(() =>
-                NativeMethods.StorageGO_CloseTransfer(unchecked((ulong)handle.ToInt64()), forceSync ? 1 : 0));
+                NativeMethods.StorageGO_CloseTransfer(Id, forceSync ? 1 : 0));
             NativeJson.EnsureSuccess(response.Success, response.Error);
+        }
+        catch { closeFailed = true; throw; }
+        finally
+        {
+            CompleteClose();
+            try { _client.DeferredCloseCompletion.GetAwaiter().GetResult(); }
+            catch when (closeFailed) { /* Preserve the transfer close failure. */ }
+        }
+    }
+
+    internal async ValueTask CloseCheckedAsync(bool forceSync)
+    {
+        var closeFailed = false;
+        try
+        {
+            var response = await NativeAsync.Invoke<NativeJson.StatusResponse>(
+                new("closeTransfer", TransferId: Id, ForceSync: forceSync), handle: this).ConfigureAwait(false);
+            NativeJson.EnsureSuccess(response.Success, response.Error);
+        }
+        catch
+        {
+            closeFailed = true;
+            try { NativeMethods.StorageGO_ReleaseTransfer(Id); }
+            catch { /* Preserve the original operation failure. */ }
+            throw;
         }
         finally
         {
-            SetHandleAsInvalid();
-            ReleaseClientReference();
-            Dispose();
+            CompleteClose();
+            try { await _client.DeferredCloseCompletion.ConfigureAwait(false); }
+            catch when (closeFailed) { /* Preserve the transfer close failure. */ }
         }
+    }
+
+    private void CompleteClose()
+    {
+        SetHandleAsInvalid();
+        ReleaseClientReference();
+        Dispose();
     }
 
     protected override bool ReleaseHandle()
     {
-        // Finalization is best effort. Explicit stream disposal reports close/sync failures.
+        // Finalizers schedule cleanup, retaining the client until the transfer callback settles.
+        _ = CloseFinalizedAsync(Id);
+        return true;
+    }
+
+    private async Task CloseFinalizedAsync(ulong transferId)
+    {
         try
         {
-            var response = NativeMethods.StorageGO_CloseTransfer(unchecked((ulong)handle.ToInt64()), 0);
-            if (response != IntPtr.Zero)
-            {
-                NativeMethods.StorageGO_FreeResult(response);
-            }
-
-            return true;
+            await NativeAsync.Invoke<NativeJson.StatusResponse>(new("closeTransfer", TransferId: transferId))
+                .ConfigureAwait(false);
         }
         catch
         {
-            return false;
+            try { NativeMethods.StorageGO_ReleaseTransfer(transferId); }
+            catch { /* Finalizer cleanup must never throw. */ }
         }
         finally
         {
@@ -58,6 +96,7 @@ internal sealed class NativeTransferHandle : SafeHandleZeroOrMinusOneIsInvalid
         if (_clientReferenceHeld)
         {
             _clientReferenceHeld = false;
+            _client.TransferClosed();
             _client.DangerousRelease();
         }
     }

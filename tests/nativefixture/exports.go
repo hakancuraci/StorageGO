@@ -12,20 +12,61 @@ package main
 import "C"
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 	"unsafe"
 )
+
+func init() {
+	nativeAsyncOpenRead = func(ctx context.Context, clientID uint64, name string) nativeTransferResponse {
+		return fixtureOpenContext(ctx, clientID, name, true, false)
+	}
+	nativeAsyncOpenWrite = func(ctx context.Context, clientID uint64, name string, overwrite bool) nativeTransferResponse {
+		return fixtureOpenContext(ctx, clientID, name, false, overwrite)
+	}
+}
+
+var fixtureSlowCalls atomic.Uint64
+var fixtureIOGate = struct {
+	sync.Mutex
+	wait chan struct{}
+}{}
+
+func fixtureWait(name string) {
+	if strings.HasSuffix(name, ".slow") {
+		fixtureSlowCalls.Add(1)
+		time.Sleep(200 * time.Millisecond)
+	}
+	if strings.HasSuffix(name, ".blocked") {
+		fixtureIOGate.Lock()
+		wait := fixtureIOGate.wait
+		fixtureIOGate.Unlock()
+		fixtureSlowCalls.Add(1)
+		if wait != nil {
+			<-wait
+		}
+	}
+}
 
 type fixtureFile struct {
 	*os.File
 	name string
 }
 
+func (f *fixtureFile) Read(p []byte) (int, error) {
+	fixtureWait(f.name)
+	return f.File.Read(p)
+}
+
 func (f *fixtureFile) Write(p []byte) (int, error) {
+	fixtureWait(f.name)
 	if strings.HasSuffix(f.name, ".writefail") {
 		n, err := f.File.Write(p[:min(2, len(p))])
 		if err != nil {
@@ -44,6 +85,10 @@ func (f *fixtureFile) Sync() error {
 }
 
 func (f *fixtureFile) Close() error {
+	if strings.HasSuffix(f.name, ".slowclose") {
+		fixtureSlowCalls.Add(1)
+		time.Sleep(200 * time.Millisecond)
+	}
 	err := f.File.Close()
 	if strings.HasSuffix(f.name, ".closefail") {
 		return errors.Join(err, errors.New("fixture close failure"))
@@ -52,6 +97,10 @@ func (f *fixtureFile) Close() error {
 }
 
 func fixtureOpen(clientID uint64, name string, readable, overwrite bool) nativeTransferResponse {
+	return fixtureOpenContext(context.Background(), clientID, name, readable, overwrite)
+}
+
+func fixtureOpenContext(ctx context.Context, clientID uint64, name string, readable, overwrite bool) nativeTransferResponse {
 	if strings.TrimSpace(name) == "" || strings.ContainsRune(name, '\x00') {
 		return nativeTransferResponse{Error: "invalid fixture path"}
 	}
@@ -61,8 +110,15 @@ func fixtureOpen(clientID uint64, name string, readable, overwrite bool) nativeT
 	}
 	client.opMu.Lock()
 	defer client.opMu.Unlock()
+	if ctx.Err() != nil {
+		return nativeTransferResponse{Error: "fixture open cancelled before I/O"}
+	}
 	if client.closed {
 		return nativeTransferResponse{Error: "fixture client closed"}
+	}
+	if strings.HasSuffix(name, ".slowopen") {
+		fixtureSlowCalls.Add(1)
+		time.Sleep(200 * time.Millisecond)
 	}
 	flags := os.O_RDONLY
 	if !readable {
@@ -112,6 +168,29 @@ func StorageGO_FixtureTransferCount() C.uint64_t {
 	nativeTransfers.RLock()
 	defer nativeTransfers.RUnlock()
 	return C.uint64_t(len(nativeTransfers.items))
+}
+
+//export StorageGO_FixtureSlowCallCount
+func StorageGO_FixtureSlowCallCount() C.uint64_t { return C.uint64_t(fixtureSlowCalls.Load()) }
+
+//export StorageGO_FixtureArmIOGate
+func StorageGO_FixtureArmIOGate() {
+	fixtureIOGate.Lock()
+	defer fixtureIOGate.Unlock()
+	if fixtureIOGate.wait != nil {
+		close(fixtureIOGate.wait)
+	}
+	fixtureIOGate.wait = make(chan struct{})
+}
+
+//export StorageGO_FixtureReleaseIOGate
+func StorageGO_FixtureReleaseIOGate() {
+	fixtureIOGate.Lock()
+	defer fixtureIOGate.Unlock()
+	if fixtureIOGate.wait != nil {
+		close(fixtureIOGate.wait)
+		fixtureIOGate.wait = nil
+	}
 }
 
 //export StorageGO_ABIVersion

@@ -44,7 +44,14 @@ internal static class NativeJson
         }
     }
 
-    internal sealed record StatusResponse(bool Success, string? Error);
+    internal interface IResponse
+    {
+        bool Success { get; }
+        string? Error { get; }
+        bool Cancelled { get; }
+    }
+
+    internal sealed record StatusResponse(bool Success, string? Error, bool Cancelled = false) : IResponse;
 
     internal sealed record OpenResponse(
         bool Success,
@@ -52,11 +59,13 @@ internal static class NativeJson
         string? FileName,
         long FileSize,
         string? MimeType,
-        string? Error);
+        string? Error,
+        bool Cancelled = false) : IResponse;
 
     internal sealed record ChunkResponse(
         bool Success,
         int BytesTransferred,
         bool Eof,
-        string? Error);
+        string? Error,
+        bool Cancelled = false) : IResponse;
 }
