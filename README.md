@@ -421,6 +421,29 @@ manuel çalıştırmada şu artifact'leri üretir:
 Her iki platformda Go race testleri, ABI header kontrolü ve .NET/native senkron
 ve async chunk aktarım testleri çalıştırılır.
 
+### NuGet.org'a otomatik yayın
+
+Yayın işlemi NuGet.org Trusted Publishing ve GitHub Actions OIDC kullanır; kalıcı
+bir NuGet API anahtarı veya GitHub repository secret gerekmez. NuGet.org'daki
+aktif politika `hakancuraci/StorageGO` repository'sinin `build-native.yml`
+workflow'una `StorageGO.Client` paketini yayımlama yetkisi verir. Workflow geçici
+yayın anahtarını `NuGet/login` ile yalnızca yayın job'ı sırasında alır.
+
+Bir sürüm yayınlamak için sürüm tag'ini oluşturup gönderin:
+
+```powershell
+git tag v1.2.1
+git push origin v1.2.1
+```
+
+Workflow Windows ve Linux native kütüphanelerini yeniden derleyip test eder,
+tag'deki `v` önekini kaldırarak paket sürümünü (`1.2.1`) belirler ve paketi
+NuGet.org'a gönderir. Ön sürüm tag'leri de desteklenir (örneğin
+`v1.3.0-beta.1`). Aynı sürüm daha önce yayınlanmışsa adım `--skip-duplicate`
+sayesinde hata vermeden tamamlanır. NuGet paket sürümleri değiştirilemediği için
+yayınlanan bir tag'i yeniden kullanmak yerine her yayın için yeni bir sürüm
+numarası seçin.
+
 Windows job'ı `msys2/setup-msys2` ile UCRT64 GCC'yi kurar. Native test/build ve
 interop adımları, action'ın bildirdiği kurulum dizininden gelen PATH ve `CC`
 ayarlarını kullanır; runner'da önceden kurulu GCC veya sabit bir dizin varsayılmaz.
