@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" Link="README.md" />
+    <None Include="../../README.tr.md" Pack="true" PackagePath="/" Link="README.tr.md" />
     <None Include="../../artifacts/win-x64/storagego.dll"
           Pack="true" PackagePath="runtimes/win-x64/native/" Visible="false"
           Link="runtimes/win-x64/native/storagego.dll" CopyToOutputDirectory="PreserveNewest"
