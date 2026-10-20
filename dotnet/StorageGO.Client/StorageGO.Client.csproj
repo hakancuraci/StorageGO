@@ -10,6 +10,8 @@
     <PackageVersion>1.2.0</PackageVersion>
     <Description>.NET 8 wrapper for the StorageGO native SMB client.</Description>
     <Authors>StorageGO</Authors>
+    <Copyright>Copyright (c) 2026 hakancuraci</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryType>git</RepositoryType>
     <RepositoryUrl>https://github.com/hakancuraci/StorageGO</RepositoryUrl>
     <PackageProjectUrl>https://github.com/hakancuraci/StorageGO</PackageProjectUrl>
