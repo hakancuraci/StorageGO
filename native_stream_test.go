@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +24,22 @@ type memoryTransferFile struct {
 	writes     int
 	syncs      int
 	closes     int
+}
+
+type metadataTransferFile struct {
+	memoryTransferFile
+	stats int
+	seeks int
+}
+
+func (f *metadataTransferFile) Stat() (os.FileInfo, error) {
+	f.stats++
+	return nil, errors.New("Stat must not be called for a write transfer")
+}
+
+func (f *metadataTransferFile) Seek(int64, int) (int64, error) {
+	f.seeks++
+	return 0, errors.New("Seek must not be called for a write transfer")
 }
 
 func (f *memoryTransferFile) Read(p []byte) (int, error) {
@@ -83,6 +100,23 @@ func addMemoryTransfer(client *nativeSMBClient, file nativeTransferFile, readabl
 	client.opMu.Lock()
 	defer client.opMu.Unlock()
 	return registerNativeTransferLocked(client, file, readable)
+}
+
+func TestNativeWritePreparationDoesNotQueryMetadata(t *testing.T) {
+	file := &metadataTransferFile{memoryTransferFile: memoryTransferFile{
+		reader: strings.NewReader("must not be read"),
+	}}
+
+	fileSize, sniff, err := inspectNativeTransferFile(file, false)
+	if err != nil {
+		t.Fatalf("write preparation failed: %v", err)
+	}
+	if fileSize != 0 || sniff != nil {
+		t.Fatalf("write metadata = size %d, sniff %v", fileSize, sniff)
+	}
+	if file.stats != 0 || file.reads != 0 || file.seeks != 0 {
+		t.Fatalf("write queried file: stats %d, reads %d, seeks %d", file.stats, file.reads, file.seeks)
+	}
 }
 
 func TestNativeTransferReadsBinaryDataAcrossChunks(t *testing.T) {

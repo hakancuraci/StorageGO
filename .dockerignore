@@ -1,0 +1,11 @@
+.git
+.github
+**/bin
+**/obj
+artifacts
+.tmp-pack
+.smoke
+*.nupkg
+*.dll
+*.so
+*.h

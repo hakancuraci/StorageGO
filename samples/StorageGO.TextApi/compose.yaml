@@ -1,0 +1,19 @@
+services:
+  text-api:
+    image: storagego-text-api:local
+    platform: linux/amd64
+    build:
+      context: ../..
+      dockerfile: samples/StorageGO.TextApi/Dockerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      Smb__Server: host.docker.internal
+      Smb__Port: "1445"
+      Smb__ShareName: testshare
+      Smb__Username: testuser
+      Smb__Password: ${SMB_PASSWORD:-TestPass123}
+      TextApi__MaxTextBytes: "16777216"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

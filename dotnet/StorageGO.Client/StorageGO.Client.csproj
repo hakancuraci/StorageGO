@@ -6,8 +6,8 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
     <PackageId>StorageGO.Client</PackageId>
-    <Version>1.2.0</Version>
-    <PackageVersion>1.2.0</PackageVersion>
+    <Version>1.2.3</Version>
+    <PackageVersion>1.2.3</PackageVersion>
     <Description>.NET 8 wrapper for the StorageGO native SMB client.</Description>
     <Authors>StorageGO</Authors>
     <Copyright>Copyright (c) 2026 hakancuraci</Copyright>

@@ -44,6 +44,12 @@ type nativeTransferFile interface {
 	Sync() error
 }
 
+type nativeOpenedFile interface {
+	nativeTransferFile
+	Stat() (os.FileInfo, error)
+	Seek(offset int64, whence int) (int64, error)
+}
+
 // All mutable transfer state and file I/O are protected by client.opMu. Registry
 // locks are released before taking opMu, including when Close races a chunk.
 type nativeTransfer struct {
@@ -135,37 +141,45 @@ func openNativeTransferContext(ctx context.Context, clientID uint64, remotePath 
 		return nativeTransferResponse{Error: fmt.Sprintf("dosya açılamadı: %v", err), ConnectionReusable: reusable}
 	}
 
-	info, err := file.Stat()
-	if err != nil || info.IsDir() {
+	fileSize, sniff, err := inspectNativeTransferFile(file, readable)
+	if err != nil {
 		_ = file.Close()
-		if err != nil {
-			return nativeTransferResponse{Error: fmt.Sprintf("dosya bilgisi alınamadı: %v", err)}
-		}
-		return nativeTransferResponse{Error: "path bir dosya olmalıdır"}
+		return nativeTransferResponse{Error: err.Error()}
+	}
+	id := registerNativeTransferLocked(client, file, readable)
+	return nativeTransferResponse{
+		Success: true, TransferID: id, FileSize: fileSize,
+		FileName: path.Base(strings.ReplaceAll(remotePath, `\`, "/")),
+		MimeType: getMimeType(remotePath, sniff),
+	}
+}
+
+func inspectNativeTransferFile(file nativeOpenedFile, readable bool) (int64, []byte, error) {
+	// A write-only SMB handle does not necessarily have FILE_READ_ATTRIBUTES.
+	// Writes do not need initial metadata, so avoid QUERY_INFO entirely.
+	if !readable {
+		return 0, nil, nil
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		return 0, nil, fmt.Errorf("dosya bilgisi alınamadı: %w", err)
+	}
+	if info.IsDir() {
+		return 0, nil, errors.New("path bir dosya olmalıdır")
 	}
 
 	// Sniff at most 512 bytes, then rewind before exposing a forward-only stream.
 	// Metadata remains consistent across Windows and Linux path separators.
-	var sniff []byte
-	if readable {
-		var header [512]byte
-		n, readErr := file.Read(header[:])
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			_ = file.Close()
-			return nativeTransferResponse{Error: fmt.Sprintf("dosya başlığı okunamadı: %v", readErr)}
-		}
-		sniff = header[:n]
-		if _, err := file.Seek(0, io.SeekStart); err != nil {
-			_ = file.Close()
-			return nativeTransferResponse{Error: fmt.Sprintf("dosya konumu sıfırlanamadı: %v", err)}
-		}
+	var header [512]byte
+	n, readErr := file.Read(header[:])
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return 0, nil, fmt.Errorf("dosya başlığı okunamadı: %w", readErr)
 	}
-	id := registerNativeTransferLocked(client, file, readable)
-	return nativeTransferResponse{
-		Success: true, TransferID: id, FileSize: info.Size(),
-		FileName: path.Base(strings.ReplaceAll(remotePath, `\`, "/")),
-		MimeType: getMimeType(remotePath, sniff),
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return 0, nil, fmt.Errorf("dosya konumu sıfırlanamadı: %w", err)
 	}
+	return info.Size(), header[:n], nil
 }
 
 func validateNativeChunk(buffer []byte) error {
